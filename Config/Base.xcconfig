@@ -1,0 +1,2 @@
+// Change this if Sideloadly reports the bundle ID is already taken.
+PRODUCT_BUNDLE_IDENTIFIER = com.dormremote.w8n4p1
