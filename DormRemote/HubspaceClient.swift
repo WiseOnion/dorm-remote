@@ -18,12 +18,21 @@ struct HubLight: Identifiable {
 @MainActor
 @Observable
 final class HubspaceClient: NSObject {
-  enum State: Equatable { case signedOut, signingIn, needsCode, loading, ready, failed(String) }
+  enum State: Equatable {
+    case signedOut, signingIn, needsCode, loading, ready
+    /// Login failed; the sign-in form shows the reason.
+    case loginFailed(String)
+    /// Signed in, but the lights couldn't be loaded (offline, Hubspace down).
+    case unavailable(String)
+  }
 
   var state: State = .signedOut
   var lights: [HubLight] = []
+  /// Last failed command, shown under the lights. Commands failing never sign you out.
+  var commandError: String?
+  var log: [String] = []
 
-  private enum K {
+  enum K {
     static let authHost = "https://accounts.hubspaceconnect.com/auth/realms/thd"
     static let apiHost = "https://api2.afero.net"
     static let dataHost = "https://semantics2.afero.net"
@@ -36,11 +45,13 @@ final class HubspaceClient: NSObject {
   private var refreshToken: String? = Keychain.read(K.refreshKey)
   private var idToken: String?
   private var tokenExpiry = Date.distantPast
+  /// One refresh at a time: Keycloak may rotate the refresh token, so parallel refreshes could sign you out.
+  private var refreshing: Task<String, Error>?
   private var accountID: String?
   private var verifier = ""
   private var otpAction: URL?
   private var loginSession: URLSession?
-  private var colorTask: Task<Void, Never>?
+  private var pendingSends: [String: Task<Void, Never>] = [:]
 
   override init() {
     super.init()
@@ -51,6 +62,7 @@ final class HubspaceClient: NSObject {
 
   func signIn(email: String, password: String) async {
     state = .signingIn
+    endLoginSession()
     do {
       // Fresh cookie jar per login; Keycloak ties the form to its session cookie.
       let session = URLSession(configuration: .ephemeral, delegate: self, delegateQueue: nil)
@@ -70,12 +82,14 @@ final class HubspaceClient: NSObject {
       var req = URLRequest(url: auth.url!)
       req.setValue(K.userAgent, forHTTPHeaderField: "User-Agent")
       let (page, pageResp) = try await session.data(for: req)
+      note("login page \(Self.status(pageResp))")
       let code: String
       if let redirect = Self.authCode(pageResp) {
         code = redirect
       } else {
         let action = try Self.formAction(String(decoding: page, as: UTF8.self), id: "kc-form-login")
         let (body, resp) = try await post(session, action, ["username": email, "password": password, "credentialId": ""])
+        note("login submit \(Self.status(resp))")
         if let c = Self.authCode(resp) {
           code = c
         } else if body.contains("kc-otp-login-form") {
@@ -88,20 +102,36 @@ final class HubspaceClient: NSObject {
       }
       try await exchange(code: code)
     } catch {
-      state = .failed(error.localizedDescription)
+      endLoginSession()
+      state = .loginFailed(error.localizedDescription)
     }
   }
 
   /// Hubspace sometimes emails a one-time code after the password.
   func submitCode(_ otp: String) async {
-    guard let session = loginSession, let action = otpAction else { return }
+    guard let session = loginSession, let action = otpAction else {
+      state = .loginFailed("Sign in again")
+      return
+    }
     state = .signingIn
     do {
-      let (_, resp) = try await post(session, action, ["action": "submit", "flowName": "doLogIn", "emailCode": otp])
-      guard let code = Self.authCode(resp) else { throw Failure("That code didn't work") }
+      let (body, resp) = try await post(session, action, ["action": "submit", "flowName": "doLogIn", "emailCode": otp])
+      note("code submit \(Self.status(resp))")
+      guard let code = Self.authCode(resp) else {
+        // A wrong code returns the form again with a new action URL.
+        if let retry = try? Self.formAction(body, id: "kc-otp-login-form") {
+          otpAction = retry
+          state = .needsCode
+          commandError = "That code didn't work. Try again."
+          return
+        }
+        throw Failure("That code didn't work")
+      }
+      commandError = nil
       try await exchange(code: code)
     } catch {
-      state = .failed(error.localizedDescription)
+      endLoginSession()
+      state = .loginFailed(error.localizedDescription)
     }
   }
 
@@ -111,6 +141,7 @@ final class HubspaceClient: NSObject {
     idToken = nil
     accountID = nil
     lights = []
+    commandError = nil
     state = .signedOut
   }
 
@@ -122,8 +153,14 @@ final class HubspaceClient: NSObject {
       "code_verifier": verifier,
       "client_id": K.clientID,
     ])
-    loginSession = nil
+    endLoginSession()
     await load()
+  }
+
+  /// The session retains its delegate (self) until invalidated.
+  private func endLoginSession() {
+    loginSession?.invalidateAndCancel()
+    loginSession = nil
   }
 
   private func tokenRequest(_ form: [String: String]) async throws {
@@ -133,11 +170,18 @@ final class HubspaceClient: NSObject {
     req.setValue(K.userAgent, forHTTPHeaderField: "User-Agent")
     req.httpBody = Self.formBody(form)
     let (data, resp) = try await URLSession.shared.data(for: req)
-    guard (resp as? HTTPURLResponse)?.statusCode == 200,
+    let status = Self.status(resp)
+    note("token \(status)")
+    // 400/401 means the refresh token was revoked or expired; anything else may be temporary.
+    if status == 400 || status == 401 {
+      signOut()
+      throw Failure("Hubspace signed you out. Sign in again.")
+    }
+    guard status == 200,
           let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
           let id = json["id_token"] as? String,
           let refresh = json["refresh_token"] as? String
-    else { throw Failure("Hubspace login expired. Sign in again.") }
+    else { throw Failure("Hubspace login returned \(status)") }
     // aioafero sends the id_token as the bearer, not the access_token.
     idToken = id
     refreshToken = refresh
@@ -145,16 +189,23 @@ final class HubspaceClient: NSObject {
     tokenExpiry = Date().addingTimeInterval((json["expires_in"] as? Double ?? 120) - 5)
   }
 
-  private func bearer() async throws -> String {
-    if let idToken, Date() < tokenExpiry { return idToken }
+  private func bearer(forceRefresh: Bool = false) async throws -> String {
+    if !forceRefresh, let idToken, Date() < tokenExpiry { return idToken }
+    if let refreshing { return try await refreshing.value }
     guard let refreshToken else { throw Failure("Not signed in") }
-    try await tokenRequest([
-      "grant_type": "refresh_token",
-      "refresh_token": refreshToken,
-      "scope": "openid email offline_access profile",
-      "client_id": K.clientID,
-    ])
-    return idToken!
+    let task = Task<String, Error> {
+      defer { self.refreshing = nil }
+      try await self.tokenRequest([
+        "grant_type": "refresh_token",
+        "refresh_token": refreshToken,
+        "scope": "openid email offline_access profile",
+        "client_id": K.clientID,
+      ])
+      guard let token = self.idToken else { throw Failure("Not signed in") }
+      return token
+    }
+    refreshing = task
+    return try await task.value
   }
 
   // MARK: Devices
@@ -164,84 +215,88 @@ final class HubspaceClient: NSObject {
     do {
       if accountID == nil {
         let me = try await api("GET", K.apiHost + "/v1/users/me") as? [String: Any]
-        let access = me?["accountAccess"] as? [[String: Any]]
-        accountID = (access?.first?["account"] as? [String: Any])?["accountId"] as? String
+        accountID = Self.accountID(from: me)
         guard accountID != nil else { throw Failure("No Hubspace account found") }
       }
       let list = try await api("GET", K.dataHost + "/v1/accounts/\(accountID!)/metadevices?expansions=state,capabilities,semantics") as? [[String: Any]] ?? []
       lights = list.compactMap(Self.parseLight)
+      note("found \(lights.count) light(s) in \(list.count) device record(s)")
+      commandError = nil
       state = .ready
     } catch {
-      state = refreshToken == nil ? .signedOut : .failed(error.localizedDescription)
+      note("load failed: \(error.localizedDescription)")
+      state = refreshToken == nil ? .signedOut : .unavailable(error.localizedDescription)
     }
   }
 
   func setPower(_ light: HubLight, _ on: Bool) {
     update(light.id) { $0.on = on }
-    put(light, [("power", on ? "on" : "off")])
+    send(light, key: "power", [("power", on ? "on" : "off")], delay: 0)
   }
 
   func setBrightness(_ light: HubLight, _ value: Int) {
-    update(light.id) { $0.brightness = value }
-    debounced { self.put(light, [("power", "on"), ("brightness", value)]) }
+    update(light.id) { $0.brightness = value; $0.on = true }
+    send(light, key: "brightness", [("power", "on"), ("brightness", value)])
   }
 
   func setColor(_ light: HubLight, r: Int, g: Int, b: Int) {
-    update(light.id) { $0.r = r; $0.g = g; $0.b = b }
-    debounced {
-      self.put(light, [("power", "on"), ("color-mode", "color"), ("color-rgb", ["color-rgb": ["r": r, "g": g, "b": b]])])
-    }
+    update(light.id) { $0.r = r; $0.g = g; $0.b = b; $0.on = true }
+    send(light, key: "color", [("power", "on"), ("color-mode", "color"), ("color-rgb", ["color-rgb": ["r": r, "g": g, "b": b]])])
   }
 
   private func update(_ id: String, _ change: (inout HubLight) -> Void) {
     if let i = lights.firstIndex(where: { $0.id == id }) { change(&lights[i]) }
   }
 
-  /// The cloud is slow; drags send only once they pause.
-  private func debounced(_ action: @escaping () -> Void) {
-    colorTask?.cancel()
-    colorTask = Task {
-      try? await Task.sleep(for: .milliseconds(250))
-      if !Task.isCancelled { action() }
-    }
-  }
-
-  private func put(_ light: HubLight, _ values: [(String, Any)]) {
-    guard let accountID else { return }
-    let now = Int(Date().timeIntervalSince1970 * 1000)
-    let states: [[String: Any]] = values.map { cls, value in
-      let instance: String? = light.instances[cls] ?? nil
-      return ["functionClass": cls,
-              "functionInstance": instance.map { $0 as Any } ?? NSNull(),
-              "value": value,
-              "lastUpdateTime": now]
-    }
-    let body: [String: Any] = ["metadeviceId": light.id, "values": states]
-    Task {
+  /// The cloud is slow, so drags send once they pause. Each kind of change waits separately,
+  /// so a color change isn't dropped by a brightness change right after it.
+  private func send(_ light: HubLight, key: String, _ values: [(String, Any)], delay: Int = 250) {
+    let slot = light.id + key
+    pendingSends[slot]?.cancel()
+    let body = Self.stateBody(light, values, now: Int(Date().timeIntervalSince1970 * 1000))
+    pendingSends[slot] = Task {
+      if delay > 0 { try? await Task.sleep(for: .milliseconds(delay)) }
+      guard !Task.isCancelled, let accountID else { return }
       do {
         _ = try await api("PUT", K.dataHost + "/v1/accounts/\(accountID)/metadevices/\(light.id)/state", json: body)
+        commandError = nil
       } catch {
-        state = .failed(error.localizedDescription)
+        commandError = "\(light.name): \(error.localizedDescription)"
       }
     }
   }
 
-  private func api(_ method: String, _ url: String, json: [String: Any]? = nil) async throws -> Any? {
+  private func api(_ method: String, _ url: String, json: [String: Any]? = nil, retried: Bool = false) async throws -> Any? {
     var req = URLRequest(url: URL(string: url)!)
     req.httpMethod = method
-    req.setValue("Bearer \(try await bearer())", forHTTPHeaderField: "Authorization")
+    req.setValue("Bearer \(try await bearer(forceRefresh: retried))", forHTTPHeaderField: "Authorization")
     req.setValue(K.userAgent, forHTTPHeaderField: "User-Agent")
     if let json {
       req.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
       req.httpBody = try JSONSerialization.data(withJSONObject: json)
     }
     let (data, resp) = try await URLSession.shared.data(for: req)
-    let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+    let status = Self.status(resp)
+    note("\(method) \(URL(string: url)?.path ?? "") \(status)")
+    // A token can be rejected before its stated expiry; refresh once and retry.
+    if status == 401, !retried { return try await api(method, url, json: json, retried: true) }
     guard (200..<300).contains(status) else { throw Failure("Hubspace returned \(status)") }
     return data.isEmpty ? nil : try JSONSerialization.jsonObject(with: data)
   }
 
-  private static func parseLight(_ dev: [String: Any]) -> HubLight? {
+  private func note(_ line: String) {
+    log.append("hubspace: " + line)
+    if log.count > 200 { log.removeFirst(log.count - 200) }
+  }
+
+  // MARK: Parsing (internal so tests can reach them)
+
+  static func accountID(from me: [String: Any]?) -> String? {
+    let access = me?["accountAccess"] as? [[String: Any]]
+    return (access?.first?["account"] as? [String: Any])?["accountId"] as? String
+  }
+
+  static func parseLight(_ dev: [String: Any]) -> HubLight? {
     guard dev["typeId"] as? String == "metadevice.device",
           let id = dev["id"] as? String,
           let description = dev["description"] as? [String: Any],
@@ -253,14 +308,27 @@ final class HubspaceClient: NSObject {
       if light.instances[cls] == nil { light.instances.updateValue(s["functionInstance"] as? String, forKey: cls) }
       switch cls {
       case "power": light.on = s["value"] as? String == "on"
-      case "brightness": light.brightness = s["value"] as? Int ?? light.brightness
+      case "brightness": light.brightness = (s["value"] as? NSNumber)?.intValue ?? light.brightness
       case "color-rgb":
-        let rgb = (s["value"] as? [String: Any])?["color-rgb"] as? [String: Int] ?? [:]
-        light.r = rgb["r"] ?? 255; light.g = rgb["g"] ?? 255; light.b = rgb["b"] ?? 255
+        let rgb = (s["value"] as? [String: Any])?["color-rgb"] as? [String: Any] ?? [:]
+        light.r = (rgb["r"] as? NSNumber)?.intValue ?? 255
+        light.g = (rgb["g"] as? NSNumber)?.intValue ?? 255
+        light.b = (rgb["b"] as? NSNumber)?.intValue ?? 255
       default: break
       }
     }
     return light
+  }
+
+  static func stateBody(_ light: HubLight, _ values: [(String, Any)], now: Int) -> [String: Any] {
+    let states: [[String: Any]] = values.map { pair in
+      let instance: String? = light.instances[pair.0] ?? nil
+      return ["functionClass": pair.0,
+              "functionInstance": instance.map { $0 as Any } ?? NSNull(),
+              "value": pair.1,
+              "lastUpdateTime": now]
+    }
+    return ["metadeviceId": light.id, "values": states]
   }
 
   // MARK: Helpers
@@ -276,14 +344,16 @@ final class HubspaceClient: NSObject {
     return (String(decoding: data, as: UTF8.self), resp)
   }
 
+  private static func status(_ resp: URLResponse) -> Int { (resp as? HTTPURLResponse)?.statusCode ?? 0 }
+
   /// The login finishes by redirecting to hubspace-app://loginredirect?code=…, which is never followed.
-  private static func authCode(_ resp: URLResponse) -> String? {
-    guard let http = resp as? HTTPURLResponse, http.statusCode == 302,
+  static func authCode(_ resp: URLResponse) -> String? {
+    guard let http = resp as? HTTPURLResponse, (300..<400).contains(http.statusCode),
           let location = http.value(forHTTPHeaderField: "Location") else { return nil }
     return URLComponents(string: location)?.queryItems?.first { $0.name == "code" }?.value
   }
 
-  private static func formAction(_ html: String, id: String) throws -> URL {
+  static func formAction(_ html: String, id: String) throws -> URL {
     let forms = html.matches(of: #/<form\b[^>]*>/#).map { String($0.output) }
     guard let tag = forms.first(where: { $0.contains("id=\"\(id)\"") }),
           let action = tag.firstMatch(of: #/action="([^"]+)"/#)?.output.1,
@@ -292,10 +362,10 @@ final class HubspaceClient: NSObject {
     return url
   }
 
-  private static func formBody(_ form: [String: String]) -> Data {
-    var allowed = CharacterSet.alphanumerics
-    allowed.insert(charactersIn: "-._~")
-    return Data(form.map { k, v in
+  /// application/x-www-form-urlencoded with only RFC 3986 unreserved ASCII left as is.
+  static func formBody(_ form: [String: String]) -> Data {
+    let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+    return Data(form.sorted { $0.key < $1.key }.map { k, v in
       "\(k)=\(v.addingPercentEncoding(withAllowedCharacters: allowed) ?? "")"
     }.joined(separator: "&").utf8)
   }
@@ -308,7 +378,7 @@ final class HubspaceClient: NSObject {
 
 extension HubspaceClient: URLSessionTaskDelegate {
   nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                  newRequest request: URLRequest) async -> URLRequest? {
+                              newRequest request: URLRequest) async -> URLRequest? {
     nil
   }
 }

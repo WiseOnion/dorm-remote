@@ -33,7 +33,7 @@ struct ContentView: View {
           Button("Log") { showLog = true }
         }
       }
-      .sheet(isPresented: $showLog) { LogView(lines: strip.log) }
+      .sheet(isPresented: $showLog) { LogView(lines: strip.log + hubspace.log) }
     }
   }
 
@@ -52,10 +52,12 @@ struct ContentView: View {
           .font(.subheadline)
       case .off:
         Text("Turn on Bluetooth to find your strip.").foregroundStyle(.secondary)
-      case .connecting:
-        ProgressView("Connecting…")
-      case .unlocking:
-        ProgressView("Unlocking…")
+      case .connecting, .unlocking:
+        HStack {
+          ProgressView(strip.state == .unlocking ? "Unlocking…" : "Connecting…")
+          Spacer()
+          Button("Cancel") { strip.cancelConnecting() }.frame(minHeight: 44)
+        }
       case .failed(let message):
         Text(message).foregroundStyle(.red)
         Button("Scan again") { strip.scan() }.buttonStyle(.bordered)
@@ -85,7 +87,7 @@ struct ContentView: View {
       Text("Close the DayBetter app first. The strip takes one Bluetooth connection at a time. Tap your strip below; the closest devices are at the top.")
         .font(.subheadline)
         .foregroundStyle(.secondary)
-      if strip.devices.isEmpty {
+      if strip.devices.isEmpty, strip.state == .scanning {
         ProgressView().frame(maxWidth: .infinity)
       }
       ForEach(strip.devices) { device in
@@ -158,14 +160,14 @@ private struct BulbCard: View {
       HStack {
         Text("Hubspace bulb").font(.title3.bold())
         Spacer()
-        if hubspace.state == .ready {
-          Button("Sign out") { hubspace.signOut() }.font(.caption)
+        if hubspace.state == .ready || isUnavailable {
+          Button("Sign out") { hubspace.signOut() }.font(.caption).frame(minHeight: 44)
         }
       }
 
       switch hubspace.state {
-      case .signedOut, .failed:
-        if case .failed(let message) = hubspace.state {
+      case .signedOut, .loginFailed:
+        if case .loginFailed(let message) = hubspace.state {
           Text(message).foregroundStyle(.red).font(.subheadline)
         }
         Text("Sign in with your Hubspace account once. The app keeps you signed in.")
@@ -183,6 +185,9 @@ private struct BulbCard: View {
           .disabled(email.isEmpty || password.isEmpty)
       case .needsCode:
         Text("Hubspace emailed you a code.").font(.subheadline).foregroundStyle(.secondary)
+        if let error = hubspace.commandError {
+          Text(error).foregroundStyle(.red).font(.subheadline)
+        }
         field("Code") {
           TextField("", text: $code).keyboardType(.numberPad).textContentType(.oneTimeCode)
         }
@@ -190,8 +195,12 @@ private struct BulbCard: View {
           Task { await hubspace.submitCode(code) }
         } label: { Text("Submit").frame(maxWidth: .infinity, minHeight: 44) }
           .buttonStyle(.borderedProminent)
+          .disabled(code.isEmpty)
       case .signingIn, .loading:
         ProgressView().frame(maxWidth: .infinity)
+      case .unavailable(let message):
+        Text("Couldn't reach Hubspace: \(message)").foregroundStyle(.red).font(.subheadline)
+        Button("Try again") { Task { await hubspace.load() } }.buttonStyle(.bordered)
       case .ready:
         if hubspace.lights.isEmpty {
           Text("No lights on this account.").foregroundStyle(.secondary)
@@ -199,10 +208,18 @@ private struct BulbCard: View {
         ForEach(hubspace.lights) { light in
           LightRow(hubspace: hubspace, light: light)
         }
-        Button("Refresh") { Task { await hubspace.load() } }.font(.subheadline)
+        if let error = hubspace.commandError {
+          Text(error).foregroundStyle(.red).font(.subheadline)
+        }
+        Button("Refresh") { Task { await hubspace.load() } }.font(.subheadline).frame(minHeight: 44)
       }
     }
     .card()
+  }
+
+  private var isUnavailable: Bool {
+    if case .unavailable = hubspace.state { return true }
+    return false
   }
 
   private func field(_ label: String, @ViewBuilder _ input: () -> some View) -> some View {

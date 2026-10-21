@@ -60,13 +60,17 @@ final class StripController: NSObject {
   private var peripheral: CBPeripheral?
   private var writeChar: CBCharacteristic?
   private var notifyChar: CBCharacteristic?
-  // ponytail: only the newest unsent command is kept, so dragging a slider never floods the strip.
   private var inFlight = false
-  private var pending: Data?
+  // ponytail: one queued command per command type, newest wins, so dragging a slider never floods
+  // the strip and a tap on "On" isn't dropped by a color change right after it.
+  private var pending: [Data] = []
   // Sources disagree on 3-byte RGB vs 4-byte RGBW color. Start with RGB; switch if the strip rejects it.
   private var useRGBW = false
   private var lastColor: (UInt8, UInt8, UInt8) = (255, 255, 255)
   private var handshakeTimer: Timer?
+  private var connectTimer: Timer?
+  /// The user tapped Disconnect; don't reconnect on our own.
+  private var userDisconnected = false
 
   private static let savedKey = "stripPeripheralID"
 
@@ -77,6 +81,7 @@ final class StripController: NSObject {
 
   func scan() {
     guard central.state == .poweredOn else { return }
+    if let peripheral, state != .connected { central.cancelPeripheralConnection(peripheral) }
     devices = []
     state = .scanning
     // The strip may not advertise its service, so scan everything and let the user pick.
@@ -85,12 +90,21 @@ final class StripController: NSObject {
 
   func connect(_ device: FoundDevice) {
     central.stopScan()
+    userDisconnected = false
     attach(device.peripheral)
   }
 
   func disconnect() {
-    if let peripheral { central.cancelPeripheralConnection(peripheral) }
+    userDisconnected = true
     UserDefaults.standard.removeObject(forKey: Self.savedKey)
+    if let peripheral { central.cancelPeripheralConnection(peripheral) }
+  }
+
+  /// Stops a connection attempt that is taking too long and goes back to the device list.
+  func cancelConnecting() {
+    connectTimer?.invalidate()
+    if let peripheral { central.cancelPeripheralConnection(peripheral) }
+    scan()
   }
 
   func setPower(_ on: Bool) { send(Daybetter.frame(Daybetter.power, [on ? 1 : 0])) }
@@ -112,16 +126,34 @@ final class StripController: NSObject {
     state = .connecting
     note("connecting to \(p.name ?? p.identifier.uuidString)")
     central.connect(p)
+    // CoreBluetooth waits forever for a strip that's out of range or unplugged.
+    connectTimer?.invalidate()
+    connectTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
+      guard let self, self.state == .connecting || self.state == .unlocking else { return }
+      self.note("connection timed out")
+      self.cancelConnecting()
+    }
+  }
+
+  private func fail(_ message: String) {
+    connectTimer?.invalidate()
+    handshakeTimer?.invalidate()
+    state = .failed(message)
+    if let peripheral { central.cancelPeripheralConnection(peripheral) }
   }
 
   private func send(_ data: Data) {
     guard state == .connected, let peripheral, let writeChar else { return }
+    let canWrite = writeChar.properties.contains(.write) ? !inFlight : peripheral.canSendWriteWithoutResponse
+    guard canWrite else {
+      pending.removeAll { $0[1] == data[1] }
+      pending.append(data)
+      return
+    }
     if writeChar.properties.contains(.write) {
-      if inFlight { pending = data; return }
       inFlight = true
       peripheral.writeValue(data, for: writeChar, type: .withResponse)
     } else {
-      guard peripheral.canSendWriteWithoutResponse else { pending = data; return }
       peripheral.writeValue(data, for: writeChar, type: .withoutResponse)
     }
     note("→ " + hex(data))
@@ -136,13 +168,13 @@ final class StripController: NSObject {
   }
 
   private func flushPending() {
-    guard let next = pending else { return }
-    pending = nil
-    send(next)
+    guard !pending.isEmpty else { return }
+    send(pending.removeFirst())
   }
 
   private func ready() {
     handshakeTimer?.invalidate()
+    connectTimer?.invalidate()
     state = .connected
     connectedName = peripheral?.name
     if let peripheral { UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedKey) }
@@ -166,13 +198,18 @@ final class StripController: NSObject {
     case 0x00 where state == .unlocking && bytes.count >= 10:
       let response = Daybetter.cchip + [bytes[8] ^ 36, bytes[9] ^ 76]
       rawWrite(Daybetter.frame(0x01, response))
+      // This strip does use the unlock, so a missing confirmation is a failure, not old firmware.
+      handshakeTimer?.invalidate()
+      handshakeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+        guard let self, self.state == .unlocking else { return }
+        self.fail("The strip didn't confirm the unlock. Open the log and share it.")
+      }
     case 0x01 where state == .unlocking && bytes.count >= 9:
       if bytes[8] == 0 {
         note("unlocked")
         ready()
       } else {
-        handshakeTimer?.invalidate()
-        state = .failed("The strip rejected the unlock. Open the log and share it.")
+        fail("The strip rejected the unlock. Open the log and share it.")
       }
     case Daybetter.color where bytes[3] != 0x01 && !useRGBW:
       note("3-byte color rejected, switching to RGBW")
@@ -227,8 +264,8 @@ extension StripController: CBCentralManagerDelegate {
   }
 
   func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
-    state = .failed(error?.localizedDescription ?? "Couldn't connect")
     note("connect failed: \(error?.localizedDescription ?? "unknown")")
+    fail(error?.localizedDescription ?? "Couldn't connect")
   }
 
   func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
@@ -237,9 +274,15 @@ extension StripController: CBCentralManagerDelegate {
     notifyChar = nil
     connectedName = nil
     inFlight = false
-    pending = nil
-    state = .idle
+    pending = []
     note("disconnected \(error?.localizedDescription ?? "")")
+    // Keep an error on screen, and don't fight a scan the user started.
+    if case .failed = state { return }
+    if state == .scanning { return }
+    let wasConnected = state == .connected
+    state = .idle
+    // The strip dropped (unplugged, out of range): try again until it's back or the user picks another.
+    if wasConnected, !userDisconnected { attach(peripheral) }
   }
 }
 
@@ -248,7 +291,7 @@ extension StripController: CBPeripheralDelegate {
     let services = peripheral.services ?? []
     note("services: " + services.map(\.uuid.uuidString).joined(separator: ", "))
     guard let service = services.first(where: { Daybetter.characteristics(for: $0.uuid) != nil }) else {
-      state = .failed("No Daybetter service found. Open the log and share it.")
+      fail("No Daybetter service found. Open the log and share it.")
       return
     }
     note("using service \(service.uuid.uuidString)")
@@ -263,7 +306,7 @@ extension StripController: CBPeripheralDelegate {
     writeChar = chars.first { $0.uuid == expected?.write && writable($0) } ?? chars.first(where: writable)
     notifyChar = chars.first { $0.uuid == expected?.notify } ?? chars.first { $0.properties.contains(.notify) }
     guard writeChar != nil else {
-      state = .failed("No writable characteristic. Open the log and share it.")
+      fail("No writable characteristic. Open the log and share it.")
       return
     }
     if let notifyChar {
