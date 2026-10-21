@@ -2,14 +2,27 @@ import CoreBluetooth
 import Foundation
 import Observation
 
-/// Daybetter strip over Bluetooth LE.
-/// Frame: A0 <cmd> <payloadLen+3> <payload…> <CRC-16/MODBUS, low byte first>.
-/// Commands come from homebridge-daybetter; the checksum was identified by matching its captured frames.
+/// Daybetter "QC" (whole-strip RGB) controllers over Bluetooth LE.
+/// Frame: A0 <cmd> <payloadLen+3> <payload…> <CRC-16/MODBUS, low byte first>; replies start with A1.
+/// Protocol: DoudGeorges/daybetter-leds PROTOCOL.md, grimsteel/daybetter-led-strip, homebridge-daybetter.
 enum Daybetter {
-  static let service = CBUUID(string: "E026")
   static let power: UInt8 = 0x11
+  static let mode: UInt8 = 0x12
   static let brightness: UInt8 = 0x13
   static let color: UInt8 = 0x15
+  static let cchip: [UInt8] = Array("CCHIP".utf8)
+
+  /// Controller revisions use different GATT IDs. Most follow E0xx service → A0xx write / F0xx notify.
+  static func characteristics(for service: CBUUID) -> (write: CBUUID, notify: CBUUID)? {
+    let id = service.uuidString.uppercased()
+    if id == "FF10" { return (CBUUID(string: "FF12"), CBUUID(string: "FF11")) }
+    if id == "AE30" { return (CBUUID(string: "AE01"), CBUUID(string: "AE02")) }
+    if id.count == 4, id.hasPrefix("E0") {
+      let suffix = id.suffix(2)
+      return (CBUUID(string: "A0" + suffix), CBUUID(string: "F0" + suffix))
+    }
+    return nil
+  }
 
   static func crc16modbus(_ bytes: [UInt8]) -> UInt16 {
     var crc: UInt16 = 0xFFFF
@@ -36,7 +49,7 @@ struct FoundDevice: Identifiable {
 
 @Observable
 final class StripController: NSObject {
-  enum State: Equatable { case off, idle, scanning, connecting, connected, failed(String) }
+  enum State: Equatable { case off, idle, scanning, connecting, unlocking, connected, failed(String) }
 
   var state: State = .off
   var devices: [FoundDevice] = []
@@ -45,10 +58,15 @@ final class StripController: NSObject {
 
   private var central: CBCentralManager!
   private var peripheral: CBPeripheral?
-  private var characteristic: CBCharacteristic?
+  private var writeChar: CBCharacteristic?
+  private var notifyChar: CBCharacteristic?
   // ponytail: only the newest unsent command is kept, so dragging a slider never floods the strip.
   private var inFlight = false
   private var pending: Data?
+  // Sources disagree on 3-byte RGB vs 4-byte RGBW color. Start with RGB; switch if the strip rejects it.
+  private var useRGBW = false
+  private var lastColor: (UInt8, UInt8, UInt8) = (255, 255, 255)
+  private var handshakeTimer: Timer?
 
   private static let savedKey = "stripPeripheralID"
 
@@ -77,7 +95,16 @@ final class StripController: NSObject {
 
   func setPower(_ on: Bool) { send(Daybetter.frame(Daybetter.power, [on ? 1 : 0])) }
   func setBrightness(_ percent: Int) { send(Daybetter.frame(Daybetter.brightness, [UInt8(max(1, min(100, percent)))])) }
-  func setColor(r: UInt8, g: UInt8, b: UInt8) { send(Daybetter.frame(Daybetter.color, [r, g, b])) }
+
+  func setColor(r: UInt8, g: UInt8, b: UInt8) {
+    lastColor = (r, g, b)
+    send(colorFrame())
+  }
+
+  private func colorFrame() -> Data {
+    let (r, g, b) = lastColor
+    return Daybetter.frame(Daybetter.color, useRGBW ? [r, g, b, 0] : [r, g, b])
+  }
 
   private func attach(_ p: CBPeripheral) {
     peripheral = p
@@ -88,16 +115,24 @@ final class StripController: NSObject {
   }
 
   private func send(_ data: Data) {
-    guard let peripheral, let characteristic else { return }
-    if characteristic.properties.contains(.write) {
+    guard state == .connected, let peripheral, let writeChar else { return }
+    if writeChar.properties.contains(.write) {
       if inFlight { pending = data; return }
       inFlight = true
-      peripheral.writeValue(data, for: characteristic, type: .withResponse)
+      peripheral.writeValue(data, for: writeChar, type: .withResponse)
     } else {
       guard peripheral.canSendWriteWithoutResponse else { pending = data; return }
-      peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+      peripheral.writeValue(data, for: writeChar, type: .withoutResponse)
     }
-    note("→ " + data.map { String(format: "%02X", $0) }.joined(separator: " "))
+    note("→ " + hex(data))
+  }
+
+  /// Handshake writes skip the queue; nothing else is sent until the strip is unlocked.
+  private func rawWrite(_ data: Data) {
+    guard let peripheral, let writeChar else { return }
+    let type: CBCharacteristicWriteType = writeChar.properties.contains(.write) ? .withResponse : .withoutResponse
+    peripheral.writeValue(data, for: writeChar, type: type)
+    note("→ " + hex(data))
   }
 
   private func flushPending() {
@@ -106,9 +141,54 @@ final class StripController: NSObject {
     send(next)
   }
 
+  private func ready() {
+    handshakeTimer?.invalidate()
+    state = .connected
+    connectedName = peripheral?.name
+    if let peripheral { UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedKey) }
+  }
+
+  private func startHandshake() {
+    state = .unlocking
+    rawWrite(Daybetter.frame(0x00, Daybetter.cchip))
+    // Older firmware never answers the challenge and needs no unlock.
+    handshakeTimer?.invalidate()
+    handshakeTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+      guard let self, self.state == .unlocking else { return }
+      self.note("no CCHIP reply, continuing without unlock")
+      self.ready()
+    }
+  }
+
+  private func handle(_ bytes: [UInt8]) {
+    guard bytes.count >= 4, bytes[0] == 0xA1 else { return }
+    switch bytes[1] {
+    case 0x00 where state == .unlocking && bytes.count >= 10:
+      let response = Daybetter.cchip + [bytes[8] ^ 36, bytes[9] ^ 76]
+      rawWrite(Daybetter.frame(0x01, response))
+    case 0x01 where state == .unlocking && bytes.count >= 9:
+      if bytes[8] == 0 {
+        note("unlocked")
+        ready()
+      } else {
+        handshakeTimer?.invalidate()
+        state = .failed("The strip rejected the unlock. Open the log and share it.")
+      }
+    case Daybetter.color where bytes[3] != 0x01 && !useRGBW:
+      note("3-byte color rejected, switching to RGBW")
+      useRGBW = true
+      send(Daybetter.frame(Daybetter.mode, [0x01, 0x00]))
+      send(colorFrame())
+    default:
+      break
+    }
+  }
+
+  private func hex(_ data: Data) -> String { data.map { String(format: "%02X", $0) }.joined(separator: " ") }
+
   private func note(_ line: String) {
     log.append(line)
-    if log.count > 200 { log.removeFirst(log.count - 200) }
+    if log.count > 300 { log.removeFirst(log.count - 300) }
   }
 }
 
@@ -142,7 +222,7 @@ extension StripController: CBCentralManagerDelegate {
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-    note("connected, looking for service E026")
+    note("connected, discovering services")
     peripheral.discoverServices(nil)
   }
 
@@ -152,7 +232,9 @@ extension StripController: CBCentralManagerDelegate {
   }
 
   func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-    characteristic = nil
+    handshakeTimer?.invalidate()
+    writeChar = nil
+    notifyChar = nil
     connectedName = nil
     inFlight = false
     pending = nil
@@ -165,25 +247,42 @@ extension StripController: CBPeripheralDelegate {
   func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
     let services = peripheral.services ?? []
     note("services: " + services.map(\.uuid.uuidString).joined(separator: ", "))
-    guard let service = services.first(where: { $0.uuid == Daybetter.service }) else {
-      state = .failed("This strip doesn't use service E026. Open the log and screenshot it.")
+    guard let service = services.first(where: { Daybetter.characteristics(for: $0.uuid) != nil }) else {
+      state = .failed("No Daybetter service found. Open the log and share it.")
       return
     }
+    note("using service \(service.uuid.uuidString)")
     peripheral.discoverCharacteristics(nil, for: service)
   }
 
   func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
     let chars = service.characteristics ?? []
     for c in chars { note("char \(c.uuid.uuidString) props \(c.properties.rawValue)") }
-    guard let writable = chars.first(where: { $0.properties.contains(.write) || $0.properties.contains(.writeWithoutResponse) }) else {
-      state = .failed("No writable characteristic in E026")
+    let expected = Daybetter.characteristics(for: service.uuid)
+    let writable = { (c: CBCharacteristic) in c.properties.contains(.write) || c.properties.contains(.writeWithoutResponse) }
+    writeChar = chars.first { $0.uuid == expected?.write && writable($0) } ?? chars.first(where: writable)
+    notifyChar = chars.first { $0.uuid == expected?.notify } ?? chars.first { $0.properties.contains(.notify) }
+    guard writeChar != nil else {
+      state = .failed("No writable characteristic. Open the log and share it.")
       return
     }
-    characteristic = writable
-    connectedName = peripheral.name
-    state = .connected
-    UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedKey)
-    note("using \(writable.uuid.uuidString)")
+    if let notifyChar {
+      peripheral.setNotifyValue(true, for: notifyChar)
+    } else {
+      ready()
+    }
+  }
+
+  func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+    if let error { note("notify error: \(error.localizedDescription)") }
+    guard state == .connecting else { return }
+    startHandshake()
+  }
+
+  func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+    guard let value = characteristic.value else { return }
+    note("← " + hex(value))
+    handle([UInt8](value))
   }
 
   func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
