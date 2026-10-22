@@ -58,6 +58,7 @@ final class HubspaceClient: NSObject {
   private var otpAction: URL?
   private var loginSession: URLSession?
   private var pendingSends: [String: Task<Void, Never>] = [:]
+  private var poller: Task<Void, Never>?
 
   override init() {
     super.init()
@@ -142,6 +143,7 @@ final class HubspaceClient: NSObject {
   }
 
   func signOut() {
+    poller?.cancel()
     Keychain.delete(K.refreshKey)
     refreshToken = nil
     idToken = nil
@@ -229,9 +231,29 @@ final class HubspaceClient: NSObject {
       note("found \(lights.count) light(s) in \(list.count) device record(s)")
       commandError = nil
       state = .ready
+      startPolling()
     } catch {
       note("load failed: \(error.localizedDescription)")
       state = refreshToken == nil ? .signedOut : .unavailable(error.localizedDescription)
+    }
+  }
+
+  /// Re-reads the bulbs so the app shows what they're really doing, including changes made in the Hubspace app
+  /// or by the bulb itself. Skipped while a command is waiting, so it can't undo a change you just made.
+  func refresh() async {
+    guard state == .ready, let accountID, pendingSends.values.allSatisfy(\.isCancelled) || pendingSends.isEmpty else { return }
+    guard let list = try? await api("GET", K.dataHost + "/v1/accounts/\(accountID)/metadevices?expansions=state,capabilities,semantics") as? [[String: Any]],
+          pendingSends.isEmpty else { return }
+    lights = list.compactMap(Self.parseLight)
+  }
+
+  private func startPolling() {
+    poller?.cancel()
+    poller = Task {
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(15))
+        await refresh()
+      }
     }
   }
 
@@ -314,6 +336,12 @@ final class HubspaceClient: NSObject {
       } catch {
         commandError = "\(light.name): \(error.localizedDescription)"
       }
+      // A newer command for this slot cancels this task; only the latest one clears the slot.
+      guard !Task.isCancelled else { return }
+      pendingSends[slot] = nil
+      // Read back what the bulb settled on.
+      try? await Task.sleep(for: .seconds(2))
+      await refresh()
     }
   }
 
