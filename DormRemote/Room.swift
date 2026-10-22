@@ -346,6 +346,18 @@ final class Room {
     for light in targets(id) { white(light, kelvin) }
   }
 
+  /// Shows one color on the strip and on your bulbs at once, so the strip's balance can be matched by eye.
+  func showForMatching(_ c: RGB) {
+    stopEffect()
+    mood = nil
+    for light in myReady where light.kind != .projector { paint(light, c) }
+  }
+
+  func setStripBalance(_ balance: [Double], resend c: RGB) {
+    strip.balance = balance
+    if let light = myReady.first(where: { $0.kind == .strip }) { paint(light, c) }
+  }
+
   func setBulbEffect(_ id: String, _ effect: String) {
     mood = nil
     item(id).flatMap(hub).map { hubspace.setEffect($0, effect) }

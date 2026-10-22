@@ -403,6 +403,7 @@ private struct LightSheet: View {
   let id: String
   @State private var mode = Mode.color
   @State private var renaming = false
+  @State private var matching = false
   @State private var newName = ""
   @Environment(\.dismiss) private var dismiss
 
@@ -462,6 +463,12 @@ private struct LightSheet: View {
       .onAppear {
         let inEffect = item.kind == .strip ? room.effect != nil : item.effect != nil
         mode = inEffect ? .effects : item.kelvin != nil ? .white : .color
+      }
+      .sheet(isPresented: $matching) {
+        MatchSheet(room: room)
+          .presentationDragIndicator(.visible)
+          .presentationBackground(Ink.card)
+          .preferredColorScheme(.dark)
       }
       .alert("Rename", isPresented: $renaming) {
         TextField("Name", text: $newName)
@@ -666,6 +673,15 @@ private struct LightSheet: View {
       }
     }
     .tint(item.glow.color)
+    if item.kind == .strip {
+      Button { matching = true } label: {
+        Label("Match colors with the lamp", systemImage: "eyedropper.halffull")
+          .font(.subheadline.weight(.semibold))
+          .frame(maxWidth: .infinity, minHeight: 48)
+          .background(Capsule().fill(Ink.raised))
+      }
+      .buttonStyle(.plain)
+    }
     HStack {
       Button("Rename") {
         newName = item.name
@@ -687,6 +703,79 @@ private struct LightSheet: View {
     }
     .font(.subheadline)
     .frame(minHeight: 44)
+    }
+  }
+}
+
+/// Puts the same color on the strip and the lamp; sliders scale the strip's red, green, and blue until they match.
+private struct MatchSheet: View {
+  var room: Room
+  @State private var balance: [Double] = []
+  @State private var test = 0
+  @Environment(\.dismiss) private var dismiss
+
+  private static let tests: [(String, RGB)] = [
+    ("White", RGB(r: 255, g: 255, b: 255)), ("Orange", RGB(r: 255, g: 100, b: 20)),
+    ("Purple", RGB(r: 140, g: 0, b: 255)), ("Teal", RGB(r: 0, g: 210, b: 200)),
+  ]
+  private static let channels: [(String, Color)] = [("Red", .red), ("Green", .green), ("Blue", .blue)]
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Match colors").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Your lamp and strip now show the same color. Slide the strip's channels until it looks like the lamp. Start with White, then check the others.")
+            .foregroundStyle(Ink.dim)
+        }
+        HStack(spacing: 8) {
+          ForEach(Self.tests.indices, id: \.self) { i in
+            Button {
+              test = i
+              room.showForMatching(Self.tests[i].1)
+            } label: {
+              VStack(spacing: 6) {
+                Circle().fill(Self.tests[i].1.color).frame(width: 44, height: 44)
+                  .overlay(Circle().strokeBorder(Ink.text, lineWidth: test == i ? 2 : 0).padding(-4))
+                Text(Self.tests[i].0).font(.caption).foregroundStyle(test == i ? Ink.text : Ink.dim)
+              }
+              .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+          }
+        }
+        if balance.count == 3 {
+          ForEach(0..<3, id: \.self) { i in
+            VStack(alignment: .leading, spacing: 8) {
+              Text("Strip \(Self.channels[i].0.lowercased())").font(.subheadline.weight(.semibold)).foregroundStyle(Ink.dim)
+              PillSlider(
+                value: Binding(get: { balance[i] }, set: { v in
+                  balance[i] = v
+                  room.setStripBalance(balance, resend: Self.tests[test].1)
+                }),
+                fill: AnyShapeStyle(Self.channels[i].1.opacity(0.8)),
+                range: 0.05...1,
+                label: "Strip \(Self.channels[i].0)"
+              )
+              .frame(height: 44)
+            }
+          }
+        }
+        HStack {
+          Button("Reset") {
+            balance = Daybetter.defaultBalance
+            room.setStripBalance(balance, resend: Self.tests[test].1)
+          }
+          Spacer()
+          Button("Done") { dismiss() }.font(.body.weight(.semibold))
+        }
+        .frame(minHeight: 44)
+      }
+      .padding(24)
+    }
+    .onAppear {
+      balance = room.strip.balance
+      room.showForMatching(Self.tests[test].1)
     }
   }
 }

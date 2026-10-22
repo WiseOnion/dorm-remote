@@ -33,8 +33,11 @@ enum Daybetter {
     218, 221, 223, 225, 228, 230, 233, 235, 238, 240, 243, 245, 248, 250, 253, 255,
   ]
 
-  static func corrected(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> [UInt8] {
-    [gamma[Int(r)], UInt8(Int(gamma[Int(g)]) * 100 / 255), UInt8(Int(gamma[Int(b)]) * 140 / 255)]
+  /// grimsteel's hand-tuned channel balance (255, 100, 140 out of 255). "Match colors" changes it per strip.
+  static let defaultBalance: [Double] = [1, 100.0 / 255, 140.0 / 255]
+
+  static func corrected(_ r: UInt8, _ g: UInt8, _ b: UInt8, balance: [Double] = defaultBalance) -> [UInt8] {
+    zip([r, g, b], balance).map { v, k in UInt8(Int(Double(gamma[Int(v)]) * k)) }
   }
 
   /// DayBetter names its strips by model code, e.g. P031_3712.
@@ -109,6 +112,10 @@ final class StripController: NSObject {
   // ponytail: one queued command per command type, newest wins, so dragging a slider never floods
   // the strip and a tap on "On" isn't dropped by a color change right after it.
   private var pending: [Data] = []
+  /// Per-channel balance so the strip's colors match the other lights. Saved; set from "Match colors".
+  var balance: [Double] = UserDefaults.standard.array(forKey: "stripBalance") as? [Double] ?? Daybetter.defaultBalance {
+    didSet { UserDefaults.standard.set(balance, forKey: "stripBalance") }
+  }
   /// Called on the main queue whenever the strip reports its state.
   var onStatus: ((StripStatus) -> Void)?
   private var connectTimer: Timer?
@@ -158,7 +165,7 @@ final class StripController: NSObject {
 
   /// 3-byte RGB, gamma- and channel-corrected (grimsteel set_color).
   func setColor(r: UInt8, g: UInt8, b: UInt8) {
-    send(Daybetter.frame(Daybetter.color, Daybetter.corrected(r, g, b)))
+    send(Daybetter.frame(Daybetter.color, Daybetter.corrected(r, g, b, balance: balance)))
   }
 
   /// Built-in effects take one byte (grimsteel set_effect) and run on the strip after the app closes.

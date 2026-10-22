@@ -20,6 +20,8 @@ final class DaybetterTests: XCTestCase {
     XCTAssertEqual(Daybetter.corrected(255, 0, 0), [255, 0, 0])
     XCTAssertEqual(Daybetter.corrected(255, 255, 255), [255, 100, 140])
     XCTAssertEqual(Daybetter.corrected(255, 146, 39), [255, 23, 0])
+    // A custom balance scales each channel after gamma.
+    XCTAssertEqual(Daybetter.corrected(255, 255, 255, balance: [0.5, 1, 0.2]), [127, 255, 51])
   }
 
   func testRGBWColorFrame() {
