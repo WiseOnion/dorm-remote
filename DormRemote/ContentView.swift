@@ -56,8 +56,8 @@ struct ContentView: View {
         case .light(let id): LightSheet(room: room, id: id)
         case .stripSetup: StripSetup(strip: room.strip)
         case .hubSetup: HubSetup(hubspace: room.hubspace)
-        case .projector: ProjectorInfo()
-        case .log: LogView(lines: room.strip.log + room.hubspace.log)
+        case .projector: ProjectorSheet(bridge: room.bridge)
+        case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log)
         }
       }
       .presentationDragIndicator(.visible)
@@ -220,7 +220,18 @@ private struct LightRow: View {
           Text(status).font(.footnote).foregroundStyle(statusColor).lineLimit(1)
         }
         Spacer()
-        if item.status == .ready {
+        if item.kind == .projector, item.status == .ready {
+          Button {
+            BridgeController.buttons.first.map(room.bridge.press)
+          } label: {
+            Image(systemName: "power")
+              .font(.body.weight(.semibold))
+              .frame(width: 44, height: 44)
+              .background(Circle().fill(Ink.raised))
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Projector power")
+        } else if item.status == .ready {
           Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(item.id, $0) }))
             .labelsHidden()
             .tint(item.glow.color)
@@ -251,6 +262,7 @@ private struct LightRow: View {
   private var status: String {
     switch item.status {
     case .ready:
+      if item.kind == .projector { return "Tap for the remote" }
       guard item.on else { return "Off" }
       if item.kind == .strip, let effect = room.effect { return effect.name }
       if let effect = item.effect { return HubspaceClient.effectName(effect) }
@@ -849,19 +861,90 @@ private struct HubSetup: View {
   }
 }
 
-private struct ProjectorInfo: View {
+private struct ProjectorSheet: View {
+  var bridge: BridgeController
+  @State private var learnMode = false
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      Image(systemName: "moon.stars.fill")
-        .font(.system(size: 36))
-        .foregroundStyle(Ink.dim)
-      Text("Galaxy projector").font(.system(size: 28, weight: .bold, design: .rounded))
-      Text("The projector only takes infrared, and iPhones have no IR blaster. A small ESP32 board with an IR LED (about $8) can bridge it: the app talks to the board over Bluetooth, and the board sends the remote's signals.")
-        .foregroundStyle(Ink.dim)
-      Spacer(minLength: 0)
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        HStack(spacing: 16) {
+          Image(systemName: "moon.stars.fill")
+            .font(.title2)
+            .frame(width: 44, height: 44)
+            .background(Circle().fill(Ink.raised))
+          Text("Galaxy projector").font(.system(size: 26, weight: .bold, design: .rounded))
+        }
+        if bridge.state == .ready {
+          remote
+        } else {
+          setup
+        }
+      }
+      .padding(24)
     }
-    .padding(24)
-    .presentationDetents([.medium])
+  }
+
+  private var remote: some View {
+    VStack(alignment: .leading, spacing: 20) {
+      if let id = bridge.learning, let button = BridgeController.buttons.first(where: { $0.id == id }) {
+        HStack {
+          ProgressView()
+          Text("Point the projector's remote at the bridge and press \(button.name).")
+            .font(.subheadline)
+          Spacer()
+          Button("Cancel") { bridge.cancelLearning() }
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised))
+      }
+      LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+        ForEach(BridgeController.buttons) { button in
+          Button {
+            learnMode ? bridge.learn(button) : bridge.press(button)
+          } label: {
+            VStack(spacing: 8) {
+              Image(systemName: button.icon).font(.title3)
+              Text(button.name).font(.caption.weight(.medium)).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, minHeight: 72)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+              .fill(button.id == "power" ? Color(hex: 0xFF453A).opacity(0.25) : Ink.raised))
+            .overlay(alignment: .topTrailing) {
+              if bridge.learned[button.id] != nil {
+                Circle().fill(Ink.text).frame(width: 6, height: 6).padding(8)
+              }
+            }
+          }
+          .buttonStyle(.plain)
+          .sensoryFeedback(.impact(weight: .light), trigger: bridge.log.count)
+        }
+      }
+      Toggle("Learn buttons from the real remote", isOn: $learnMode)
+        .font(.subheadline)
+      Text(learnMode
+           ? "Tap a button here, then press the same button on the projector's remote. Needs the IR Unit on the bridge. A dot marks learned buttons."
+           : "Buttons use common astronaut-projector codes. If one does nothing, turn on learning and teach it from the real remote.")
+        .font(.footnote)
+        .foregroundStyle(Ink.dim)
+      if !bridge.learned.isEmpty {
+        Button("Forget learned buttons", role: .destructive) { bridge.forgetLearned() }
+          .font(.subheadline)
+      }
+    }
+  }
+
+  private var setup: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("The projector only takes infrared, and iPhones have no IR blaster. Plug in a DormBridge and this turns into the projector's remote.")
+        .foregroundStyle(Ink.dim)
+      Text("What you need: an M5Stack ATOM Lite (about $8, has an IR LED built in) flashed with the DormBridge firmware, on any USB charger, pointed at the projector. Optional: the M5Stack IR Unit (about $4) to learn codes from the real remote.")
+        .foregroundStyle(Ink.dim)
+      HStack(spacing: 12) {
+        ProgressView()
+        Text(bridge.state == .off ? "Turn on Bluetooth." : "Looking for a DormBridge…").foregroundStyle(Ink.dim)
+      }
+    }
   }
 }
 

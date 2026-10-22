@@ -143,6 +143,7 @@ final class Room {
 
   let strip: StripController
   let hubspace: HubspaceClient
+  let bridge: BridgeController
 
   private(set) var effect: Effect?
   private(set) var mood: String?
@@ -162,9 +163,10 @@ final class Room {
   /// Strip mic sensitivity, 0–255.
   private(set) var sensitivity = UserDefaults.standard.object(forKey: "sensitivity") as? Int ?? 128
 
-  init(strip: StripController, hubspace: HubspaceClient) {
+  init(strip: StripController, hubspace: HubspaceClient, bridge: BridgeController) {
     self.strip = strip
     self.hubspace = hubspace
+    self.bridge = bridge
     names = UserDefaults.standard.dictionary(forKey: "names") as? [String: String] ?? [:]
     stripLook = LightItem(id: Self.stripID, name: "LED strip", kind: .strip, status: .setup)
     if let data = UserDefaults.standard.data(forKey: "stripLook"),
@@ -227,7 +229,12 @@ final class Room {
     case .signingIn, .loading: list.append(placeholder(.busy("Loading")))
     case .unavailable: list.append(placeholder(.offline("Can't reach Hubspace")))
     }
-    list.append(LightItem(id: "projector", name: names["projector"] ?? "Galaxy projector", kind: .projector, status: .setup))
+    let projectorStatus: LightItem.Status = switch bridge.state {
+    case .ready: .ready
+    case .connecting: .busy("Connecting to bridge")
+    case .off, .searching: .setup
+    }
+    list.append(LightItem(id: "projector", name: names["projector"] ?? "Galaxy projector", kind: .projector, status: projectorStatus))
     return list
   }
 
