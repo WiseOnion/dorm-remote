@@ -14,6 +14,20 @@ private enum Ink {
   static let bad = Color(hex: 0xFF6B5E)
 }
 
+/// Pressed state for every custom button: a slight shrink and dim on a spring, so taps feel answered
+/// within a frame. Off when Reduce Motion is on (only the dim stays).
+private struct Press: ButtonStyle {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label
+      .contentShape(Rectangle())
+      .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
+      .opacity(configuration.isPressed ? 0.8 : 1)
+      .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+  }
+}
+
 private enum Sheet: Identifiable {
   case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log
   var id: String {
@@ -36,6 +50,9 @@ struct ContentView: View {
   var room: Room
   @State private var sheet: Sheet?
   @State private var roomEdit: RoomEdit?
+  @State private var removing: LightItem?
+  @State private var deletingRoom: String?
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var roomName = ""
 
   private enum RoomEdit: Equatable { case add, rename(String) }
@@ -53,7 +70,7 @@ struct ContentView: View {
           Button { sheet = .add } label: {
             Label("Add", systemImage: "plus").font(.subheadline.weight(.semibold))
           }
-          .buttonStyle(.plain)
+          .buttonStyle(Press())
           .frame(minHeight: 44)
         }
         .padding(.top, 16)
@@ -110,6 +127,22 @@ struct ContentView: View {
       .presentationBackground(Ink.card)
       .preferredColorScheme(.dark)
     }
+    .confirmationDialog("Remove \(removing?.name ?? "this device")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
+      Button("Remove", role: .destructive) {
+        if let item = removing { room.remove(item) }
+        removing = nil
+      }
+    } message: {
+      Text("You can add it back from Add.")
+    }
+    .confirmationDialog("Delete \(deletingRoom ?? "room")?", isPresented: Binding(get: { deletingRoom != nil }, set: { if !$0 { deletingRoom = nil } }), titleVisibility: .visible) {
+      Button("Delete room", role: .destructive) {
+        if let name = deletingRoom { room.deleteRoom(name) }
+        deletingRoom = nil
+      }
+    } message: {
+      Text("Its devices move to \(room.rooms.first { $0 != deletingRoom } ?? "another room").")
+    }
     .alert(roomEdit == .add ? "New room" : "Rename room", isPresented: Binding(get: { roomEdit != nil }, set: { if !$0 { roomEdit = nil } })) {
       TextField("Room name", text: $roomName)
       Button("Save") {
@@ -134,11 +167,11 @@ struct ContentView: View {
             Text(name)
               .font(.subheadline.weight(.semibold))
               .padding(.horizontal, 16)
-              .frame(minHeight: 40)
+              .frame(minHeight: 44)
               .foregroundStyle(selected ? .black : Ink.text)
               .background(Capsule().fill(selected ? Ink.text : Ink.raised))
           }
-          .buttonStyle(.plain)
+          .buttonStyle(Press())
           .accessibilityAddTraits(selected ? .isSelected : [])
           .contextMenu {
             Button("Rename", systemImage: "pencil") {
@@ -146,7 +179,7 @@ struct ContentView: View {
               roomEdit = .rename(name)
             }
             if room.rooms.count > 1 {
-              Button("Delete room", systemImage: "trash", role: .destructive) { room.deleteRoom(name) }
+              Button("Delete room", systemImage: "trash", role: .destructive) { deletingRoom = name }
             }
           }
         }
@@ -155,10 +188,10 @@ struct ContentView: View {
           roomEdit = .add
         } label: {
           Image(systemName: "plus")
-            .frame(width: 40, height: 40)
+            .frame(width: 44, height: 44)
             .background(Circle().fill(Ink.raised))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Press())
         .accessibilityLabel("Add room")
       }
     }
@@ -174,14 +207,14 @@ struct ContentView: View {
       }
     }
     .ignoresSafeArea()
-    .animation(.easeInOut(duration: 0.6), value: room.ambient)
+    .animation(reduceMotion ? nil : .easeInOut(duration: 0.6), value: room.ambient)
   }
 
   private var header: some View {
     HStack(alignment: .center, spacing: 8) {
       VStack(alignment: .leading, spacing: 4) {
         Text(room.currentRoom)
-          .font(.system(size: 34, weight: .bold, design: .rounded))
+          .font(.system(.largeTitle, design: .rounded, weight: .bold))
         Text(summary)
           .font(.subheadline)
           .foregroundStyle(Ink.dim)
@@ -233,7 +266,7 @@ struct ContentView: View {
                   .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
               }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(Press())
           }
         }
       }
@@ -246,8 +279,8 @@ struct ContentView: View {
 
   private func row(_ item: LightItem) -> some View {
     LightRow(room: room, item: item) { open(item) }
-      .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-        Button(role: .destructive) { room.remove(item) } label: { Label("Remove", systemImage: "trash") }
+      .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+        Button(role: .destructive) { removing = item } label: { Label("Remove", systemImage: "trash") }
       }
   }
 
@@ -289,7 +322,7 @@ private struct PowerButton: View {
         .background(Circle().fill(on ? tint : Ink.raised))
         .shadow(color: on ? tint.opacity(0.6) : .clear, radius: 16)
     }
-    .buttonStyle(.plain)
+    .buttonStyle(Press())
     .sensoryFeedback(.impact(weight: .medium), trigger: on)
     .accessibilityLabel(on ? "Turn everything off" : "Turn everything on")
   }
@@ -343,7 +376,7 @@ private struct LightRow: View {
               .frame(width: 44, height: 44)
               .background(Circle().fill(Ink.raised))
           }
-          .buttonStyle(.plain)
+          .buttonStyle(Press())
           .accessibilityLabel("\(item.name) power")
         } else if item.status == .ready {
           Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(item.id, $0) }))
@@ -359,7 +392,7 @@ private struct LightRow: View {
           fill: AnyShapeStyle(item.glow.color),
           label: "Brightness"
         )
-        .frame(height: 36)
+        .frame(height: 44)
       }
     }
     .padding(16)
@@ -481,6 +514,7 @@ private struct LightSheet: View {
   @State private var mode = Mode.color
   @State private var renaming = false
   @State private var matching = false
+  @State private var confirmRemove = false
   @State private var newName = ""
   @Environment(\.dismiss) private var dismiss
 
@@ -488,6 +522,7 @@ private struct LightSheet: View {
     RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 0, b: 200), RGB(r: 130, g: 0, b: 255), RGB(r: 0, g: 40, b: 255),
     RGB(r: 0, g: 230, b: 255), RGB(r: 60, g: 255, b: 60), RGB(r: 255, g: 240, b: 0), RGB(r: 255, g: 100, b: 20),
   ]
+  private static let swatchNames = ["Red", "Pink", "Purple", "Blue", "Cyan", "Green", "Yellow", "Orange"]
   private static let temperatures = [2200, 2700, 4000, 5000, 6500]
 
   var body: some View {
@@ -497,7 +532,7 @@ private struct LightSheet: View {
           HStack(spacing: 16) {
             Orb(item: item, size: 44)
             Text(item.name)
-              .font(.system(size: 26, weight: .bold, design: .rounded))
+              .font(.system(.title, design: .rounded, weight: .bold))
               .lineLimit(1)
             Spacer()
             Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(id, $0) }))
@@ -573,7 +608,7 @@ private struct LightSheet: View {
           }
           .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Press())
         .accessibilityAddTraits(mode == m ? .isSelected : [])
       }
     }
@@ -615,7 +650,7 @@ private struct LightSheet: View {
               .padding(4)
               .overlay(Circle().strokeBorder(Ink.text, lineWidth: item.kelvin == k ? 2 : 0))
           }
-          .buttonStyle(.plain)
+          .buttonStyle(Press())
           .frame(maxWidth: .infinity)
           .accessibilityLabel("\(k) kelvin")
         }
@@ -638,8 +673,8 @@ private struct LightSheet: View {
               .padding(4)
               .overlay(Circle().strokeBorder(Ink.text, lineWidth: item.kelvin == nil && item.color == c ? 2 : 0))
           }
-          .buttonStyle(.plain)
-          .accessibilityLabel("Preset color \(i + 1)")
+          .buttonStyle(Press())
+          .accessibilityLabel(Self.swatchNames[i])
         }
       }
       ColorWheel(selected: item.kelvin == nil ? item.color : nil) { room.setColor(id, $0) }
@@ -737,7 +772,7 @@ private struct LightSheet: View {
       .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(active ? Ink.text.opacity(0.14) : Ink.raised))
       .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Ink.text.opacity(active ? 0.9 : 0), lineWidth: 1.5))
     }
-    .buttonStyle(.plain)
+    .buttonStyle(Press())
     .accessibilityAddTraits(active ? .isSelected : [])
   }
 
@@ -761,7 +796,7 @@ private struct LightSheet: View {
           .frame(maxWidth: .infinity, minHeight: 48)
           .background(Capsule().fill(Ink.raised))
       }
-      .buttonStyle(.plain)
+      .buttonStyle(Press())
     }
     HStack {
       Button("Rename") {
@@ -769,10 +804,15 @@ private struct LightSheet: View {
         renaming = true
       }
       Spacer()
-      Button(item.kind == .strip ? "Forget strip" : "Remove", role: .destructive) {
-        room.remove(item)
-        dismiss()
-      }
+      Button(item.kind == .strip ? "Forget strip" : "Remove", role: .destructive) { confirmRemove = true }
+        .confirmationDialog("Remove \(item.name)?", isPresented: $confirmRemove, titleVisibility: .visible) {
+          Button("Remove", role: .destructive) {
+            room.remove(item)
+            dismiss()
+          }
+        } message: {
+          Text("You can add it back from Add.")
+        }
     }
     .font(.subheadline)
     .frame(minHeight: 44)
@@ -797,7 +837,7 @@ private struct MatchSheet: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Match colors").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Match colors").font(.system(.title, design: .rounded, weight: .bold))
           Text("Your lamp and strip now show the same color. Slide the strip's channels until it looks like the lamp. Start with White, then check the others.")
             .foregroundStyle(Ink.dim)
         }
@@ -814,7 +854,7 @@ private struct MatchSheet: View {
               }
               .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(Press())
           }
         }
         if balance.count == 3 {
@@ -901,7 +941,7 @@ private struct StripSetup: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Add your LED strip").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Add your LED strip").font(.system(.title, design: .rounded, weight: .bold))
           Text("Close the DayBetter app first. The strip only talks to one app at a time.")
             .foregroundStyle(Ink.dim)
         }
@@ -942,7 +982,7 @@ private struct StripSetup: View {
               .padding(16)
               .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(Press())
           }
 
           DisclosureGroup("Not listed? Show all Bluetooth devices", isExpanded: $showOthers) {
@@ -957,7 +997,7 @@ private struct StripSetup: View {
                   .frame(minHeight: 48)
                   .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(Press())
               }
             }
           }
@@ -993,7 +1033,7 @@ private struct AddSheet: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
-      Text("Add a light").font(.system(size: 28, weight: .bold, design: .rounded)).padding(.bottom, 8)
+      Text("Add a light").font(.system(.title, design: .rounded, weight: .bold)).padding(.bottom, 8)
       ForEach(Room.AddKind.allCases) { kind in
         Button {
           dismiss()
@@ -1013,7 +1053,7 @@ private struct AddSheet: View {
           .padding(16)
           .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Press())
       }
       Spacer(minLength: 0)
     }
@@ -1047,7 +1087,7 @@ private struct LampSetup: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Add a Bluetooth bulb").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Add a Bluetooth bulb").font(.system(.title, design: .rounded, weight: .bold))
           Text("Works fully offline with bulbs made for the Happy Lighting app (they show up as Triones) or the Lotus Lamp app (ELK-BLEDOM). Close that app first.")
             .foregroundStyle(Ink.dim)
         }
@@ -1073,7 +1113,7 @@ private struct LampSetup: View {
             .padding(16)
             .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
           }
-          .buttonStyle(.plain)
+          .buttonStyle(Press())
         }
       }
       .padding(24)
@@ -1094,7 +1134,7 @@ private struct HubSetup: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Add your smart bulb").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Add your smart bulb").font(.system(.title, design: .rounded, weight: .bold))
           Text("Sign in with your Hubspace account. The bulb has to be on Wi-Fi first: Hubspace encrypts its Bluetooth, so only its own app can use that. On campus Wi-Fi, register the bulb's Wi-Fi MAC address (Hubspace app → bulb → Settings) on your school's device network, then finish Wi-Fi setup in the Hubspace app.")
             .foregroundStyle(Ink.dim)
         }
@@ -1152,7 +1192,7 @@ private struct HubSetup: View {
         .foregroundStyle(.black)
         .background(Capsule().fill(.white))
     }
-    .buttonStyle(.plain)
+    .buttonStyle(Press())
     .disabled(disabled)
     .opacity(disabled ? 0.4 : 1)
   }
@@ -1168,7 +1208,7 @@ private struct ScanSheet: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
-        Text("Find my lights").font(.system(size: 28, weight: .bold, design: .rounded))
+        Text("Find my lights").font(.system(.title, design: .rounded, weight: .bold))
         switch scanner.phase {
         case .unsupported:
           Text("This iPhone can't track motion for scanning. Place your lights on the room map instead.")
@@ -1254,7 +1294,7 @@ private struct ScanSheet: View {
         .foregroundStyle(.black)
         .background(Capsule().fill(.white))
     }
-    .buttonStyle(.plain)
+    .buttonStyle(Press())
   }
 }
 
@@ -1281,7 +1321,7 @@ private struct RoomMapSheet: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("\(room.currentRoom) map").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("\(room.currentRoom) map").font(.system(.title, design: .rounded, weight: .bold))
           Text("You're the dot in the middle. Lights found by scanning are already placed; drag any light to fix it. Dashed ones aren't placed yet.")
             .foregroundStyle(Ink.dim)
         }
@@ -1322,7 +1362,7 @@ private struct RoomMapSheet: View {
             .foregroundStyle(.black)
             .background(Capsule().fill(.white))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Press())
         Text("Each tap rolls a new color around the room, in order, timed so every light lands together.")
           .font(.footnote)
           .foregroundStyle(Ink.dim)
@@ -1348,7 +1388,7 @@ private struct RemoteSheet: View {
               .font(.title2)
               .frame(width: 44, height: 44)
               .background(Circle().fill(Ink.raised))
-            Text(device.name).font(.system(size: 26, weight: .bold, design: .rounded)).lineLimit(1)
+            Text(device.name).font(.system(.title, design: .rounded, weight: .bold)).lineLimit(1)
           }
           if room.bridge.state == .ready {
             remote(device)
@@ -1397,7 +1437,7 @@ private struct RemoteSheet: View {
               }
             }
           }
-          .buttonStyle(.plain)
+          .buttonStyle(Press())
           .accessibilityHint(ready ? "" : "Not learned yet. Tap to learn it from the real remote.")
         }
       }
@@ -1436,7 +1476,7 @@ private struct AddRemoteSheet: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Add a remote-controlled device").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Add a remote-controlled device").font(.system(.title, design: .rounded, weight: .bold))
           Text("Anything with an infrared remote. It's added to \(room.currentRoom).").foregroundStyle(Ink.dim)
         }
         VStack(alignment: .leading, spacing: 8) {
@@ -1459,7 +1499,7 @@ private struct AddRemoteSheet: View {
               .frame(minHeight: 48)
               .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(template == t.name ? Ink.raised : Ink.raised.opacity(0.4)))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(Press())
           }
         }
         Button {
@@ -1472,7 +1512,7 @@ private struct AddRemoteSheet: View {
             .foregroundStyle(.black)
             .background(Capsule().fill(.white))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(Press())
       }
       .padding(24)
     }
