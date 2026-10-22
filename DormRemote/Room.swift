@@ -37,7 +37,10 @@ struct RGB: Equatable, Codable {
 }
 
 struct LightItem: Identifiable {
-  enum Kind { case strip, bulb, bleBulb, projector }
+  /// Which driver a device comes from. Screens use `caps`, not this.
+  enum Kind { case strip, bulb, bleBulb, remote }
+  /// What a device can do; the app builds its controls from these.
+  enum Capability { case power, brightness, color, white, effects, remote }
   enum Status: Equatable { case ready, setup, busy(String), offline(String) }
 
   let id: String
@@ -54,6 +57,14 @@ struct LightItem: Identifiable {
   var speed = 0
 
   var glow: RGB { kelvin.map(RGB.kelvin) ?? color }
+
+  var caps: Set<Capability> {
+    switch kind {
+    case .strip, .bulb: [.power, .brightness, .color, .white, .effects]
+    case .bleBulb: [.power, .brightness, .color, .white]
+    case .remote: [.remote]
+    }
+  }
 }
 
 /// Room-wide presets, applied to every light at once.
@@ -132,11 +143,21 @@ enum Effect: Hashable {
   }
 }
 
+/// A remote-controlled (infrared) device reached through the DormBridge.
+struct IRDevice: Codable, Identifiable {
+  let id: UUID
+  var name: String
+  var template: String
+}
+
 @MainActor
 @Observable
 final class Room {
 
+  /// The selected room's lights.
   static let all = "all"
+  /// Every light in every room.
+  static let everything = "everything"
   /// One room for the app and its Shortcuts actions.
   static let shared = Room(strip: StripController(), hubspace: HubspaceClient(), bridge: BridgeController(), lamps: BulbBank())
   static let stripID = "strip"
@@ -157,7 +178,11 @@ final class Room {
   private var names: [String: String]
   /// Per-light choice: true = shared with roommates (kept out of scenes, All on/off, and schedules).
   private var sharedChoice = UserDefaults.standard.dictionary(forKey: "sharedLights") as? [String: Bool] ?? [:]
-  /// Lights swiped away. The strip, bulb, and projector rows come back from "Add".
+  private(set) var irDevices: [IRDevice] = {
+    guard let data = UserDefaults.standard.data(forKey: "irDevices") else { return [] }
+    return (try? JSONDecoder().decode([IRDevice].self, from: data)) ?? []
+  }()
+  /// Devices swiped away ("strip", "hub" for the whole Hubspace account, or one "hub:<id>" bulb); "Add" brings them back.
   private var hidden = Set(UserDefaults.standard.stringArray(forKey: "hiddenLights") ?? [])
   private var engine: AVAudioEngine?
   private var hue = 0.0
@@ -224,17 +249,20 @@ final class Room {
                 on: b.on, brightness: b.brightness, color: b.color, kelvin: b.kelvin)
     }
     list.append(strip)
-    let projectorStatus: LightItem.Status = switch bridge.state {
+    let remoteStatus: LightItem.Status = switch bridge.state {
     case .ready: .ready
     case .connecting: .busy("Connecting to bridge")
     case .off, .searching: .setup
     }
-    list.append(LightItem(id: "projector", name: names["projector"] ?? "Galaxy projector", kind: .projector, status: projectorStatus))
-    return list.filter { !hidden.contains($0.kind == .bulb ? "hub" : $0.id) }
+    list += irDevices.map { d in
+      let id = "ir:" + d.id.uuidString
+      return LightItem(id: id, name: names[id] ?? d.name, kind: .remote, status: remoteStatus)
+    }
+    return list.filter { !hidden.contains($0.id) && !($0.kind == .bulb && hidden.contains("hub")) }
   }
 
   enum AddKind: String, CaseIterable, Identifiable {
-    case strip = "DayBetter LED strip", hubspace = "Hubspace bulb", bluetooth = "Bluetooth bulb", projector = "Galaxy projector"
+    case strip = "DayBetter LED strip", hubspace = "Hubspace bulb", bluetooth = "Bluetooth bulb", remote = "Remote-controlled device (IR)"
     var id: String { rawValue }
   }
 
@@ -246,13 +274,13 @@ final class Room {
       strip.disconnect()
       hidden.insert(Self.stripID)
     case .bulb:
-      // Hubspace lights come as a set from one account.
-      hubspace.signOut()
-      hidden.insert("hub")
+      // Just this bulb; the other bulbs on the account (a roommate's, say) stay. Signing out is in the menu.
+      hidden.insert(item.id)
     case .bleBulb:
       lamp(item).map(lamps.remove)
-    case .projector:
-      hidden.insert("projector")
+    case .remote:
+      irDevices.removeAll { "ir:" + $0.id.uuidString == item.id }
+      saveIR()
     }
     saveHidden()
   }
@@ -261,44 +289,111 @@ final class Room {
   func restore(_ kind: AddKind) {
     switch kind {
     case .strip: hidden.remove(Self.stripID)
-    case .hubspace: hidden.remove("hub")
-    case .projector: hidden.remove("projector")
-    case .bluetooth: break
+    case .hubspace: hidden = hidden.filter { $0 != "hub" && !$0.hasPrefix("hub:") }
+    case .bluetooth, .remote: break
     }
     saveHidden()
   }
 
   private func saveHidden() { UserDefaults.standard.set(Array(hidden), forKey: "hiddenLights") }
 
+  // MARK: Remote-controlled devices
+
+  func addIRDevice(name: String, template: String) {
+    let trimmed = name.trimmingCharacters(in: .whitespaces)
+    let device = IRDevice(id: UUID(), name: trimmed.isEmpty ? template : trimmed, template: template)
+    irDevices.append(device)
+    setRoom("ir:" + device.id.uuidString, currentRoom)
+    saveIR()
+  }
+
+  func irDevice(_ itemID: String) -> IRDevice? { irDevices.first { "ir:" + $0.id.uuidString == itemID } }
+
+  /// The tile's power button: the device's "power" button, if it has a code yet.
+  func pressRemotePower(_ item: LightItem) {
+    guard let device = irDevice(item.id),
+          let power = BridgeController.buttons(for: device.template).first(where: { $0.id == "power" }) else { return }
+    bridge.press(power, device: device.id)
+  }
+
+  private func saveIR() { UserDefaults.standard.set(try? JSONEncoder().encode(irDevices), forKey: "irDevices") }
+
   var ready: [LightItem] { items.filter { $0.status == .ready } }
 
-  /// Shared lights (a living room bulb in a suite) default to shared by name; the light's sheet can change it.
-  func isShared(_ item: LightItem) -> Bool {
-    sharedChoice[item.id] ?? item.name.lowercased().contains("living")
+  // MARK: Rooms
+
+  private(set) var rooms: [String] = UserDefaults.standard.stringArray(forKey: "rooms") ?? ["Bedroom", "Living room"]
+  private var roomAssignment = UserDefaults.standard.dictionary(forKey: "roomOf") as? [String: String] ?? [:]
+  var selectedRoom = UserDefaults.standard.string(forKey: "selectedRoom") ?? "Bedroom" {
+    didSet { UserDefaults.standard.set(selectedRoom, forKey: "selectedRoom") }
   }
 
-  func setShared(_ id: String, _ shared: Bool) {
-    sharedChoice[id] = shared
-    UserDefaults.standard.set(sharedChoice, forKey: "sharedLights")
+  /// The selected room, or the first one if it was deleted.
+  var currentRoom: String { rooms.contains(selectedRoom) ? selectedRoom : rooms.first ?? "" }
+
+  /// New devices land in the first room. Lights earlier marked "shared", or named for the living room,
+  /// start in a living room so roommates' lights stay out of your room's scenes.
+  func roomOf(_ item: LightItem) -> String {
+    if let r = roomAssignment[item.id], rooms.contains(r) { return r }
+    let shared = sharedChoice[item.id] ?? item.name.lowercased().contains("living")
+    if shared, let living = rooms.first(where: { $0.lowercased().contains("living") }) { return living }
+    return rooms.first ?? ""
   }
 
-  var mine: [LightItem] { items.filter { !isShared($0) } }
-  var sharedItems: [LightItem] { items.filter(isShared) }
-  /// What room-wide controls act on: your own lights that are connected.
-  var myReady: [LightItem] { ready.filter { !isShared($0) } }
+  func setRoom(_ id: String, _ room: String) {
+    roomAssignment[id] = room
+    saveRooms()
+  }
+
+  func addRoom(_ name: String) {
+    let trimmed = name.trimmingCharacters(in: .whitespaces)
+    guard !trimmed.isEmpty, !rooms.contains(trimmed) else { return }
+    rooms.append(trimmed)
+    selectedRoom = trimmed
+    saveRooms()
+  }
+
+  func renameRoom(_ old: String, to new: String) {
+    let trimmed = new.trimmingCharacters(in: .whitespaces)
+    guard !trimmed.isEmpty, !rooms.contains(trimmed), let i = rooms.firstIndex(of: old) else { return }
+    // Pin every light that was in the old room (including ones placed by default) before renaming it.
+    for item in items where roomOf(item) == old { roomAssignment[item.id] = trimmed }
+    rooms[i] = trimmed
+    if selectedRoom == old { selectedRoom = trimmed }
+    saveRooms()
+  }
+
+  /// Its lights move to the first remaining room. The last room can't be deleted.
+  func deleteRoom(_ name: String) {
+    guard rooms.count > 1 else { return }
+    rooms.removeAll { $0 == name }
+    roomAssignment = roomAssignment.filter { $0.value != name }
+    if selectedRoom == name { selectedRoom = rooms[0] }
+    saveRooms()
+  }
+
+  private func saveRooms() {
+    UserDefaults.standard.set(rooms, forKey: "rooms")
+    UserDefaults.standard.set(roomAssignment, forKey: "roomOf")
+  }
+
+  var inRoom: [LightItem] { items.filter { roomOf($0) == currentRoom } }
+  /// What room-wide controls act on: the selected room's connected devices.
+  var roomReady: [LightItem] { ready.filter { roomOf($0) == currentRoom } }
 
   func item(_ id: String) -> LightItem? { items.first { $0.id == id } }
 
   /// What a control sheet shows: one light, or the first ready one standing in for the room.
   func look(_ id: String) -> LightItem? {
-    id == Self.all ? (myReady.first { $0.on } ?? myReady.first) : item(id)
+    let lights = roomReady.filter { $0.kind != .remote }
+    return id == Self.all ? (lights.first { $0.on } ?? lights.first) : item(id)
   }
 
-  var anyOn: Bool { myReady.contains { $0.on } }
+  var anyOn: Bool { roomReady.contains { $0.on } }
 
   /// The background glow: the color of whatever is on.
   var ambient: Color? {
-    let on = myReady.filter(\.on)
+    let on = roomReady.filter(\.on)
     guard !on.isEmpty else { return nil }
     let n = Double(on.count)
     let sum = on.reduce((0.0, 0.0, 0.0)) { ($0.0 + Double($1.glow.r), $0.1 + Double($1.glow.g), $0.2 + Double($1.glow.b)) }
@@ -324,7 +419,7 @@ final class Room {
         saveStrip()
       case .bulb: hub(light).map { hubspace.setPower($0, on) }
       case .bleBulb: lamp(light).map { lamps.setPower($0, on) }
-      case .projector: break
+      case .remote: break
       }
     }
   }
@@ -350,13 +445,15 @@ final class Room {
   func showForMatching(_ c: RGB) {
     stopEffect()
     mood = nil
-    for light in myReady where light.kind != .projector { paint(light, c) }
+    // The strip's room, whichever tab is open, so the lamp next to it is what it gets compared with.
+    let stripRoom = items.first { $0.kind == .strip }.map(roomOf)
+    for light in ready where light.kind != .remote && roomOf(light) == stripRoom { paint(light, c) }
   }
 
   func setStripBalance(_ balance: [Double], resend c: RGB) {
     strip.balance = balance
     // Instant, so slider moves show right away.
-    if myReady.contains(where: { $0.kind == .strip }) { strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
+    if ready.contains(where: { $0.kind == .strip }) { strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
   }
 
   func setBulbEffect(_ id: String, _ effect: String) {
@@ -370,7 +467,7 @@ final class Room {
 
   func apply(_ m: Mood) {
     stopEffect()
-    for light in myReady where light.kind != .projector {
+    for light in roomReady where light.kind != .remote {
       brightness(light, m.brightness)
       switch m.look {
       case .color(let c): paint(light, c)
@@ -378,12 +475,17 @@ final class Room {
       case .party: paint(light, RGB(r: 255, g: 0, b: 180))
       }
     }
-    if case .party = m.look, myReady.contains(where: { $0.kind == .strip }) { start(.pattern(10)) }
+    if case .party = m.look, roomReady.contains(where: { $0.kind == .strip }) { start(.pattern(10)) }
     mood = m.id
   }
 
   private func targets(_ id: String) -> [LightItem] {
-    (id == Self.all ? myReady : ready.filter { $0.id == id }).filter { $0.kind != .projector }
+    let lights = switch id {
+    case Self.all: roomReady
+    case Self.everything: ready
+    default: ready.filter { $0.id == id }
+    }
+    return lights.filter { $0.kind != .remote }
   }
 
   private func lamp(_ light: LightItem) -> UUID? {
@@ -403,7 +505,7 @@ final class Room {
       saveStrip()
     case .bulb: hub(light).map { hubspace.setBrightness($0, value) }
     case .bleBulb: lamp(light).map { lamps.setBrightness($0, value) }
-    case .projector: break
+    case .remote: break
     }
   }
 
@@ -417,7 +519,7 @@ final class Room {
       saveStrip()
     case .bulb: hub(light).map { hubspace.setColor($0, r: c.r, g: c.g, b: c.b) }
     case .bleBulb: lamp(light).map { lamps.setColor($0, c) }
-    case .projector: break
+    case .remote: break
     }
   }
 
@@ -432,7 +534,7 @@ final class Room {
       saveStrip()
     case .bulb: hub(light).map { hubspace.setWhite($0, kelvin: kelvin) }
     case .bleBulb: lamp(light).map { lamps.setWhite($0, kelvin) }
-    case .projector: break
+    case .remote: break
     }
   }
 

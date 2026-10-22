@@ -2,13 +2,12 @@ import CoreBluetooth
 import Foundation
 import Observation
 
-/// A projector remote button. Default codes come from the Flipper IRDB file
-/// LED_Lighting/HLKZine/Astronaut_Star_Projector.ir (NEC-extended, address 07 FD).
+/// One button on an IR remote. `command` is a known NEC code (Flipper IRDB); nil means it has to be learned.
 struct IRButton: Identifiable {
   let id: String
   let name: String
   let icon: String
-  let command: UInt8
+  var command: UInt8? = nil
 }
 
 /// Talks to the DormBridge board (firmware/), which turns Bluetooth commands into infrared.
@@ -21,23 +20,53 @@ final class BridgeController: NSObject {
   static let replyChar = CBUUID(string: "DB02")
   static let address: [UInt8] = [0x07, 0xFD]
 
-  static let buttons: [IRButton] = [
-    IRButton(id: "power", name: "Power", icon: "power", command: 0xFF),
-    IRButton(id: "nebula", name: "Nebula", icon: "sparkles", command: 0x03),
-    IRButton(id: "timer", name: "Timer", icon: "timer", command: 0x0B),
-    IRButton(id: "brightUp", name: "Brighter", icon: "sun.max", command: 0x01),
-    IRButton(id: "brightDown", name: "Dimmer", icon: "sun.min", command: 0x05),
-    IRButton(id: "speedUp", name: "Faster", icon: "hare", command: 0x04),
-    IRButton(id: "speedDown", name: "Slower", icon: "tortoise", command: 0x02),
-    IRButton(id: "starsPower", name: "Stars", icon: "star", command: 0x0F),
-    IRButton(id: "starsMode", name: "Star mode", icon: "star.circle", command: 0x0E),
-    IRButton(id: "starsUp", name: "Stars +", icon: "plus.circle", command: 0x0D),
-    IRButton(id: "starsDown", name: "Stars −", icon: "minus.circle", command: 0x0C),
-    IRButton(id: "reset", name: "Reset", icon: "arrow.counterclockwise", command: 0x1A),
+  /// Starting button layouts. Only the projector ships with codes (Flipper IRDB, HLKZine astronaut projector,
+  /// NEC-extended address 07 FD); every other device learns its buttons from its own remote.
+  static let templates: [(name: String, buttons: [IRButton])] = [
+    ("Galaxy projector", [
+      IRButton(id: "power", name: "Power", icon: "power", command: 0xFF),
+      IRButton(id: "nebula", name: "Nebula", icon: "sparkles", command: 0x03),
+      IRButton(id: "timer", name: "Timer", icon: "timer", command: 0x0B),
+      IRButton(id: "brightUp", name: "Brighter", icon: "sun.max", command: 0x01),
+      IRButton(id: "brightDown", name: "Dimmer", icon: "sun.min", command: 0x05),
+      IRButton(id: "speedUp", name: "Faster", icon: "hare", command: 0x04),
+      IRButton(id: "speedDown", name: "Slower", icon: "tortoise", command: 0x02),
+      IRButton(id: "starsPower", name: "Stars", icon: "star", command: 0x0F),
+      IRButton(id: "starsMode", name: "Star mode", icon: "star.circle", command: 0x0E),
+      IRButton(id: "starsUp", name: "Stars +", icon: "plus.circle", command: 0x0D),
+      IRButton(id: "starsDown", name: "Stars −", icon: "minus.circle", command: 0x0C),
+      IRButton(id: "reset", name: "Reset", icon: "arrow.counterclockwise", command: 0x1A),
+    ]),
+    ("TV or streaming box", [
+      IRButton(id: "power", name: "Power", icon: "power"), IRButton(id: "input", name: "Input", icon: "rectangle.on.rectangle"),
+      IRButton(id: "volUp", name: "Vol +", icon: "speaker.wave.3"), IRButton(id: "volDown", name: "Vol −", icon: "speaker.wave.1"),
+      IRButton(id: "mute", name: "Mute", icon: "speaker.slash"), IRButton(id: "home", name: "Home", icon: "house"),
+      IRButton(id: "up", name: "Up", icon: "chevron.up"), IRButton(id: "ok", name: "OK", icon: "circle"),
+      IRButton(id: "down", name: "Down", icon: "chevron.down"), IRButton(id: "left", name: "Left", icon: "chevron.left"),
+      IRButton(id: "back", name: "Back", icon: "arrow.uturn.backward"), IRButton(id: "right", name: "Right", icon: "chevron.right"),
+    ]),
+    ("Fan, heater, or AC", [
+      IRButton(id: "power", name: "Power", icon: "power"), IRButton(id: "mode", name: "Mode", icon: "dial.medium"),
+      IRButton(id: "timer", name: "Timer", icon: "timer"), IRButton(id: "speedUp", name: "Speed +", icon: "wind"),
+      IRButton(id: "speedDown", name: "Speed −", icon: "wind"), IRButton(id: "swing", name: "Swing", icon: "arrow.left.and.right"),
+      IRButton(id: "tempUp", name: "Temp +", icon: "thermometer.sun"), IRButton(id: "tempDown", name: "Temp −", icon: "thermometer.snowflake"),
+      IRButton(id: "sleep", name: "Sleep", icon: "moon"),
+    ]),
+    ("Anything else", [
+      IRButton(id: "power", name: "Power", icon: "power"), IRButton(id: "on", name: "On", icon: "circle.fill"),
+      IRButton(id: "off", name: "Off", icon: "circle"), IRButton(id: "up", name: "Up / +", icon: "plus"),
+      IRButton(id: "down", name: "Down / −", icon: "minus"), IRButton(id: "mode", name: "Mode", icon: "dial.medium"),
+      IRButton(id: "b1", name: "Button 1", icon: "1.circle"), IRButton(id: "b2", name: "Button 2", icon: "2.circle"),
+      IRButton(id: "b3", name: "Button 3", icon: "3.circle"),
+    ]),
   ]
 
+  static func buttons(for template: String) -> [IRButton] {
+    templates.first { $0.name == template }?.buttons ?? templates.last!.buttons
+  }
+
   private(set) var state = State.off
-  /// The button waiting for a code from the real remote.
+  /// "<device id>.<button id>" waiting for a code from the real remote.
   private(set) var learning: String?
   private(set) var learned: [String: Data] = UserDefaults.standard.dictionary(forKey: "irLearned") as? [String: Data] ?? [:]
   var log: [String] = []
@@ -51,25 +80,34 @@ final class BridgeController: NSObject {
     central = CBCentralManager(delegate: self, queue: .main)
   }
 
-  func press(_ button: IRButton) {
-    if let code = learned[button.id] {
+  static func key(_ device: UUID, _ button: IRButton) -> String { device.uuidString + "." + button.id }
+
+  /// Learned codes win; otherwise the template's known code. Returns false if the button has neither yet.
+  @discardableResult
+  func press(_ button: IRButton, device: UUID) -> Bool {
+    if let code = learned[Self.key(device, button)] {
       write([0x02] + code)
+    } else if let command = button.command {
+      write([0x01] + Self.address + [command])
     } else {
-      write([0x01] + Self.address + [button.command])
+      return false
     }
+    return true
   }
 
+  func isLearned(_ button: IRButton, device: UUID) -> Bool { learned[Self.key(device, button)] != nil }
+
   /// The next code the bridge's IR receiver sees gets saved for this button.
-  func learn(_ button: IRButton) {
-    learning = button.id
+  func learn(_ button: IRButton, device: UUID) {
+    learning = Self.key(device, button)
     write([0x10])
   }
 
   func cancelLearning() { learning = nil }
 
-  func forgetLearned() {
-    learned = [:]
-    UserDefaults.standard.removeObject(forKey: "irLearned")
+  func forgetLearned(device: UUID) {
+    learned = learned.filter { !$0.key.hasPrefix(device.uuidString) }
+    UserDefaults.standard.set(learned, forKey: "irLearned")
   }
 
   private func write(_ bytes: [UInt8]) {

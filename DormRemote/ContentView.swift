@@ -14,13 +14,14 @@ private enum Ink {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, projector, add, log
+  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, log
   var id: String {
     switch self {
     case .light(let id): "light-" + id
     case .stripSetup: "strip"
     case .hubSetup: "hub"
-    case .projector: "projector"
+    case .remote(let id): "remote-" + id
+    case .addRemote: "addRemote"
     case .lampSetup: "lamps"
     case .add: "add"
     case .log: "log"
@@ -31,13 +32,18 @@ private enum Sheet: Identifiable {
 struct ContentView: View {
   var room: Room
   @State private var sheet: Sheet?
+  @State private var roomEdit: RoomEdit?
+  @State private var roomName = ""
+
+  private enum RoomEdit: Equatable { case add, rename(String) }
 
   var body: some View {
     // A List, so rows get the standard iOS swipe-left-to-delete.
     List {
       Group {
         header.padding(.top, 16)
-        scenes.padding(.top, 16)
+        roomTabs
+        scenes.padding(.top, 8)
         HStack {
           SectionTitle("Lights")
           Spacer()
@@ -48,18 +54,14 @@ struct ContentView: View {
           .frame(minHeight: 44)
         }
         .padding(.top, 16)
-        ForEach(room.mine) { item in row(item) }
-        if !room.sharedItems.isEmpty {
-          VStack(alignment: .leading, spacing: 4) {
-            SectionTitle("Shared")
-            Text("Scenes, All on/off, and schedules leave these alone.")
-              .font(.footnote)
-              .foregroundStyle(Ink.dim)
-          }
-          .padding(.top, 16)
-          ForEach(room.sharedItems) { item in row(item) }
+        ForEach(room.inRoom) { item in row(item) }
+        if room.inRoom.isEmpty {
+          Text("Nothing in \(room.currentRoom) yet. Tap Add, or move a device here from its settings.")
+            .font(.subheadline)
+            .foregroundStyle(Ink.dim)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        Text("Swipe left on a light to remove it.")
+        Text("Swipe left on a device to remove it.")
           .font(.footnote)
           .foregroundStyle(Ink.dim)
           .frame(maxWidth: .infinity)
@@ -81,7 +83,8 @@ struct ContentView: View {
         case .light(let id): LightSheet(room: room, id: id)
         case .stripSetup: StripSetup(strip: room.strip)
         case .hubSetup: HubSetup(hubspace: room.hubspace)
-        case .projector: ProjectorSheet(bridge: room.bridge)
+        case .remote(let id): RemoteSheet(room: room, id: id)
+        case .addRemote: AddRemoteSheet(room: room)
         case .lampSetup: LampSetup(lamps: room.lamps)
         case .add: AddSheet { kind in
           room.restore(kind)
@@ -91,7 +94,7 @@ struct ContentView: View {
             case .strip: self.sheet = .stripSetup
             case .hubspace: self.sheet = room.hubspace.state == .ready ? nil : .hubSetup
             case .bluetooth: self.sheet = .lampSetup
-            case .projector: self.sheet = .projector
+            case .remote: self.sheet = .addRemote
             }
           }
         }
@@ -102,6 +105,60 @@ struct ContentView: View {
       .presentationBackground(Ink.card)
       .preferredColorScheme(.dark)
     }
+    .alert(roomEdit == .add ? "New room" : "Rename room", isPresented: Binding(get: { roomEdit != nil }, set: { if !$0 { roomEdit = nil } })) {
+      TextField("Room name", text: $roomName)
+      Button("Save") {
+        switch roomEdit {
+        case .add: room.addRoom(roomName)
+        case .rename(let old): room.renameRoom(old, to: roomName)
+        case nil: break
+        }
+        roomEdit = nil
+      }
+      Button("Cancel", role: .cancel) { roomEdit = nil }
+    }
+  }
+
+  /// Room tabs, like Apple Home. Press and hold a room to rename or delete it.
+  private var roomTabs: some View {
+    ScrollView(.horizontal) {
+      HStack(spacing: 8) {
+        ForEach(room.rooms, id: \.self) { name in
+          let selected = room.currentRoom == name
+          Button { room.selectedRoom = name } label: {
+            Text(name)
+              .font(.subheadline.weight(.semibold))
+              .padding(.horizontal, 16)
+              .frame(minHeight: 40)
+              .foregroundStyle(selected ? .black : Ink.text)
+              .background(Capsule().fill(selected ? Ink.text : Ink.raised))
+          }
+          .buttonStyle(.plain)
+          .accessibilityAddTraits(selected ? .isSelected : [])
+          .contextMenu {
+            Button("Rename", systemImage: "pencil") {
+              roomName = name
+              roomEdit = .rename(name)
+            }
+            if room.rooms.count > 1 {
+              Button("Delete room", systemImage: "trash", role: .destructive) { room.deleteRoom(name) }
+            }
+          }
+        }
+        Button {
+          roomName = ""
+          roomEdit = .add
+        } label: {
+          Image(systemName: "plus")
+            .frame(width: 40, height: 40)
+            .background(Circle().fill(Ink.raised))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Add room")
+      }
+    }
+    .scrollIndicators(.hidden)
+    .sensoryFeedback(.selection, trigger: room.currentRoom)
   }
 
   private var glow: some View {
@@ -118,7 +175,7 @@ struct ContentView: View {
   private var header: some View {
     HStack(alignment: .center, spacing: 8) {
       VStack(alignment: .leading, spacing: 4) {
-        Text("My Room")
+        Text(room.currentRoom)
           .font(.system(size: 34, weight: .bold, design: .rounded))
         Text(summary)
           .font(.subheadline)
@@ -126,6 +183,10 @@ struct ContentView: View {
       }
       Spacer()
       Menu {
+        Button("Turn everything off", systemImage: "power") { room.setPower(Room.everything, false) }
+        if room.hubspace.state == .ready {
+          Button("Sign out of Hubspace", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { room.hubspace.signOut() }
+        }
         Button("Show log", systemImage: "doc.text") { sheet = .log }
       } label: {
         Image(systemName: "ellipsis")
@@ -136,12 +197,12 @@ struct ContentView: View {
       PowerButton(on: room.anyOn, tint: room.ambient ?? .white) {
         room.setPower(Room.all, !room.anyOn)
       }
-      .disabled(room.myReady.isEmpty)
+      .disabled(room.roomReady.isEmpty)
     }
   }
 
   private var summary: String {
-    let ready = room.myReady
+    let ready = room.roomReady
     if ready.isEmpty { return "Tap a light to set it up" }
     let on = ready.filter(\.on).count
     return on == 0 ? "Everything's off" : on == ready.count ? "Everything's on" : "\(on) of \(ready.count) on"
@@ -170,8 +231,8 @@ struct ContentView: View {
         }
       }
       .scrollIndicators(.hidden)
-      .disabled(room.myReady.isEmpty)
-      .opacity(room.myReady.isEmpty ? 0.4 : 1)
+      .disabled(room.roomReady.isEmpty)
+      .opacity(room.roomReady.isEmpty ? 0.4 : 1)
       .sensoryFeedback(.selection, trigger: room.mood)
     }
   }
@@ -185,7 +246,7 @@ struct ContentView: View {
 
   private func open(_ item: LightItem) {
     switch (item.kind, item.status) {
-    case (.projector, _): sheet = .projector
+    case (.remote, _): sheet = .remote(item.id)
     case (_, .ready): sheet = .light(item.id)
     case (.strip, _): sheet = .stripSetup
     case (.bulb, _): sheet = .hubSetup
@@ -247,7 +308,7 @@ private struct Orb: View {
     switch item.kind {
     case .strip: "light.strip.2"
     case .bulb, .bleBulb: "lightbulb.fill"
-    case .projector: "moon.stars.fill"
+    case .remote: "dot.radiowaves.left.and.right"
     }
   }
 }
@@ -266,9 +327,9 @@ private struct LightRow: View {
           Text(status).font(.footnote).foregroundStyle(statusColor).lineLimit(1)
         }
         Spacer()
-        if item.kind == .projector, item.status == .ready {
+        if item.caps.contains(.remote), item.status == .ready {
           Button {
-            BridgeController.buttons.first.map(room.bridge.press)
+            room.pressRemotePower(item)
           } label: {
             Image(systemName: "power")
               .font(.body.weight(.semibold))
@@ -276,7 +337,7 @@ private struct LightRow: View {
               .background(Circle().fill(Ink.raised))
           }
           .buttonStyle(.plain)
-          .accessibilityLabel("Projector power")
+          .accessibilityLabel("\(item.name) power")
         } else if item.status == .ready {
           Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(item.id, $0) }))
             .labelsHidden()
@@ -296,7 +357,7 @@ private struct LightRow: View {
     }
     .padding(16)
     .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.card))
-    .opacity(item.kind == .projector ? 0.55 : 1)
+    .opacity(item.kind == .remote && item.status != .ready ? 0.55 : 1)
     .contentShape(RoundedRectangle(cornerRadius: 24))
     .onTapGesture(perform: open)
     .sensoryFeedback(.impact(weight: .light), trigger: item.on)
@@ -308,12 +369,12 @@ private struct LightRow: View {
   private var status: String {
     switch item.status {
     case .ready:
-      if item.kind == .projector { return "Tap for the remote" }
+      if item.caps.contains(.remote) { return "Tap for the remote" }
       guard item.on else { return "Off" }
       if item.kind == .strip, let effect = room.effect { return effect.name }
       if let effect = item.effect { return HubspaceClient.effectName(effect) }
       return item.kelvin.map { "\($0)K white" } ?? "Color"
-    case .setup: return item.kind == .projector ? "Needs an IR bridge" : "Tap to set up"
+    case .setup: return item.kind == .remote ? "Needs the IR bridge" : "Tap to set up"
     case .busy(let s): return s + "…"
     case .offline(let s): return s
     }
@@ -397,7 +458,16 @@ private struct KnobSlider: View {
 // MARK: - Light sheet
 
 private struct LightSheet: View {
-  enum Mode: String, CaseIterable { case white = "White", color = "Color", effects = "Effects" }
+  enum Mode: String, CaseIterable {
+    case white = "White", color = "Color", effects = "Effects"
+    var capability: LightItem.Capability {
+      switch self {
+      case .white: .white
+      case .color: .color
+      case .effects: .effects
+      }
+    }
+  }
 
   var room: Room
   let id: String
@@ -483,7 +553,7 @@ private struct LightSheet: View {
 
   private func modePicker(_ item: LightItem) -> some View {
     return HStack(spacing: 0) {
-      ForEach(item.kind == .bleBulb ? [Mode.white, .color] : Mode.allCases, id: \.self) { m in
+      ForEach(Mode.allCases.filter { item.caps.contains($0.capability) }, id: \.self) { m in
         Button { mode = m } label: {
           VStack(spacing: 8) {
             modeCircle(m)
@@ -666,13 +736,17 @@ private struct LightSheet: View {
 
   private func footer(_ item: LightItem) -> some View {
     VStack(alignment: .leading, spacing: 12) {
-    Toggle(isOn: Binding(get: { room.isShared(item) }, set: { room.setShared(id, $0) })) {
+    HStack {
       VStack(alignment: .leading, spacing: 2) {
-        Text("Shared light")
-        Text("Leave it out of scenes, All on/off, and schedules.").font(.footnote).foregroundStyle(Ink.dim)
+        Text("Room")
+        Text("Scenes and the power button act on one room at a time.").font(.footnote).foregroundStyle(Ink.dim)
       }
+      Spacer()
+      Picker("Room", selection: Binding(get: { room.roomOf(item) }, set: { room.setRoom(id, $0) })) {
+        ForEach(room.rooms, id: \.self) { Text($0).tag($0) }
+      }
+      .pickerStyle(.menu)
     }
-    .tint(item.glow.color)
     if item.kind == .strip {
       Button { matching = true } label: {
         Label("Match colors with the lamp", systemImage: "eyedropper.halffull")
@@ -688,16 +762,8 @@ private struct LightSheet: View {
         renaming = true
       }
       Spacer()
-      Button(item.kind == .strip ? "Forget strip" : item.kind == .bleBulb ? "Remove bulb" : "Sign out of Hubspace", role: .destructive) {
-        switch item.kind {
-        case .strip:
-          room.stopEffect()
-          room.strip.disconnect()
-        case .bleBulb:
-          UUID(uuidString: String(item.id.dropFirst(4))).map(room.lamps.remove)
-        default:
-          room.hubspace.signOut()
-        }
+      Button(item.kind == .strip ? "Forget strip" : "Remove", role: .destructive) {
+        room.remove(item)
         dismiss()
       }
     }
@@ -952,7 +1018,7 @@ private struct AddSheet: View {
     switch kind {
     case .strip: "light.strip.2"
     case .hubspace, .bluetooth: "lightbulb.fill"
-    case .projector: "moon.stars.fill"
+    case .remote: "dot.radiowaves.left.and.right"
     }
   }
 
@@ -961,7 +1027,7 @@ private struct AddSheet: View {
     case .strip: "Bluetooth, works offline"
     case .hubspace: "Needs the bulb on Wi-Fi"
     case .bluetooth: "Happy Lighting or Lotus Lamp bulbs, offline"
-    case .projector: "Needs the DormBridge IR board"
+    case .remote: "Projector, fan, TV, AC… through the IR bridge"
     }
   }
 }
@@ -1085,36 +1151,44 @@ private struct HubSetup: View {
   }
 }
 
-private struct ProjectorSheet: View {
-  var bridge: BridgeController
+/// Remote for any infrared device, laid out from its template. Buttons without a known code are learned
+/// from the device's own remote (needs the IR Unit on the bridge).
+private struct RemoteSheet: View {
+  var room: Room
+  let id: String
   @State private var learnMode = false
 
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
-        HStack(spacing: 16) {
-          Image(systemName: "moon.stars.fill")
-            .font(.title2)
-            .frame(width: 44, height: 44)
-            .background(Circle().fill(Ink.raised))
-          Text("Galaxy projector").font(.system(size: 26, weight: .bold, design: .rounded))
-        }
-        if bridge.state == .ready {
-          remote
-        } else {
-          setup
+        if let device = room.irDevice(id) {
+          HStack(spacing: 16) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+              .font(.title2)
+              .frame(width: 44, height: 44)
+              .background(Circle().fill(Ink.raised))
+            Text(device.name).font(.system(size: 26, weight: .bold, design: .rounded)).lineLimit(1)
+          }
+          if room.bridge.state == .ready {
+            remote(device)
+          } else {
+            setup
+          }
         }
       }
       .padding(24)
     }
   }
 
-  private var remote: some View {
-    VStack(alignment: .leading, spacing: 20) {
-      if let id = bridge.learning, let button = BridgeController.buttons.first(where: { $0.id == id }) {
+  private func remote(_ device: IRDevice) -> some View {
+    let bridge = room.bridge
+    let buttons = BridgeController.buttons(for: device.template)
+    let unknown = buttons.filter { $0.command == nil && !bridge.isLearned($0, device: device.id) }
+    return VStack(alignment: .leading, spacing: 20) {
+      if let key = bridge.learning, let button = buttons.first(where: { BridgeController.key(device.id, $0) == key }) {
         HStack {
           ProgressView()
-          Text("Point the projector's remote at the bridge and press \(button.name).")
+          Text("Point \(device.name)'s remote at the bridge and press \(button.name).")
             .font(.subheadline)
           Spacer()
           Button("Cancel") { bridge.cancelLearning() }
@@ -1123,9 +1197,10 @@ private struct ProjectorSheet: View {
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised))
       }
       LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
-        ForEach(BridgeController.buttons) { button in
+        ForEach(buttons) { button in
+          let ready = button.command != nil || bridge.isLearned(button, device: device.id)
           Button {
-            learnMode ? bridge.learn(button) : bridge.press(button)
+            if learnMode || !ready { bridge.learn(button, device: device.id) } else { bridge.press(button, device: device.id) }
           } label: {
             VStack(spacing: 8) {
               Image(systemName: button.icon).font(.title3)
@@ -1134,40 +1209,91 @@ private struct ProjectorSheet: View {
             .frame(maxWidth: .infinity, minHeight: 72)
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
               .fill(button.id == "power" ? Color(hex: 0xFF453A).opacity(0.25) : Ink.raised))
+            .opacity(ready || learnMode ? 1 : 0.45)
             .overlay(alignment: .topTrailing) {
-              if bridge.learned[button.id] != nil {
+              if bridge.isLearned(button, device: device.id) {
                 Circle().fill(Ink.text).frame(width: 6, height: 6).padding(8)
               }
             }
           }
           .buttonStyle(.plain)
-          .sensoryFeedback(.impact(weight: .light), trigger: bridge.log.count)
+          .accessibilityHint(ready ? "" : "Not learned yet. Tap to learn it from the real remote.")
         }
       }
-      Toggle("Learn buttons from the real remote", isOn: $learnMode)
+      Toggle("Re-learn buttons from the real remote", isOn: $learnMode)
         .font(.subheadline)
-      Text(learnMode
-           ? "Tap a button here, then press the same button on the projector's remote. Needs the IR Unit on the bridge. A dot marks learned buttons."
-           : "Buttons use common astronaut-projector codes. If one does nothing, turn on learning and teach it from the real remote.")
+      Text(unknown.isEmpty
+           ? "Tap a dimmed button or turn on re-learning, then press the same button on the real remote. Needs the IR Unit on the bridge. A dot marks learned buttons."
+           : "\(unknown.count) buttons aren't learned yet (dimmed). Tap one, then press the same button on the real remote. Needs the IR Unit on the bridge.")
         .font(.footnote)
         .foregroundStyle(Ink.dim)
-      if !bridge.learned.isEmpty {
-        Button("Forget learned buttons", role: .destructive) { bridge.forgetLearned() }
-          .font(.subheadline)
-      }
+      Button("Forget learned buttons", role: .destructive) { bridge.forgetLearned(device: device.id) }
+        .font(.subheadline)
     }
   }
 
   private var setup: some View {
     VStack(alignment: .leading, spacing: 12) {
-      Text("The projector only takes infrared, and iPhones have no IR blaster. Plug in a DormBridge and this turns into the projector's remote.")
-        .foregroundStyle(Ink.dim)
-      Text("What you need: an M5Stack ATOM Lite (about $8, has an IR LED built in) flashed with the DormBridge firmware, on any USB charger, pointed at the projector. Optional: the M5Stack IR Unit (about $4) to learn codes from the real remote.")
+      Text("iPhones have no IR blaster, so infrared devices go through a DormBridge: an M5Stack ATOM Lite (about $8) or ATOM Echo flashed with the DormBridge firmware, on any USB charger, pointed at the device. Add the M5Stack IR Unit (about $4) to learn buttons from any remote.")
         .foregroundStyle(Ink.dim)
       HStack(spacing: 12) {
         ProgressView()
-        Text(bridge.state == .off ? "Turn on Bluetooth." : "Looking for a DormBridge…").foregroundStyle(Ink.dim)
+        Text(room.bridge.state == .off ? "Turn on Bluetooth." : "Looking for a DormBridge…").foregroundStyle(Ink.dim)
       }
+    }
+  }
+}
+
+/// Adds any remote-controlled device. The template only sets the starting buttons.
+private struct AddRemoteSheet: View {
+  var room: Room
+  @State private var name = ""
+  @State private var template = BridgeController.templates[0].name
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Add a remote-controlled device").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Anything with an infrared remote. It's added to \(room.currentRoom).").foregroundStyle(Ink.dim)
+        }
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Name").font(.subheadline).foregroundStyle(Ink.dim)
+          TextField("", text: $name, prompt: Text("e.g. Galaxy projector, Fan"))
+            .padding(.horizontal, 16)
+            .frame(minHeight: 52)
+            .background(Ink.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Buttons").font(.subheadline).foregroundStyle(Ink.dim)
+          ForEach(BridgeController.templates, id: \.name) { t in
+            Button { template = t.name } label: {
+              HStack {
+                Text(t.name)
+                Spacer()
+                if template == t.name { Image(systemName: "checkmark") }
+              }
+              .padding(.horizontal, 16)
+              .frame(minHeight: 48)
+              .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(template == t.name ? Ink.raised : Ink.raised.opacity(0.4)))
+            }
+            .buttonStyle(.plain)
+          }
+        }
+        Button {
+          room.addIRDevice(name: name, template: template)
+          dismiss()
+        } label: {
+          Text("Add")
+            .font(.body.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .foregroundStyle(.black)
+            .background(Capsule().fill(.white))
+        }
+        .buttonStyle(.plain)
+      }
+      .padding(24)
     }
   }
 }
