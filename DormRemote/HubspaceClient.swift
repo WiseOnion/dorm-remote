@@ -273,7 +273,7 @@ final class HubspaceClient: NSObject {
   static let effectGroups: [(String, [(id: String, name: String)])] = [
     ("Fun patterns", [("rainbow", "Rainbow"), ("fade-3", "Fade 3"), ("fade-7", "Fade 7"),
                       ("jump-3", "Jump 3"), ("jump-7", "Jump 7"), ("flash", "Flash")]),
-    ("Moods", [("chill", "Chill"), ("clarity", "Clarity"), ("dinner-party", "Dinner Party"), ("focus", "Focus"),
+    ("Bulb moods", [("chill", "Chill"), ("clarity", "Clarity"), ("dinner-party", "Dinner Party"), ("focus", "Focus"),
                ("getting-ready", "Getting Ready"), ("moonlight", "Moonlight"), ("nightlight", "Night Light"),
                ("sleep", "Sleep"), ("wake-up", "Wake Up")]),
     ("Holidays", [("christmas", "Christmas"), ("july-4th", "July 4th"), ("valentines-day", "Valentine's Day")]),
