@@ -359,7 +359,11 @@ final class HubspaceClient: NSObject {
     if status == 401, !retried { return try await api(method, url, json: json, retried: true) }
     // 424: Hubspace has no path to the bulb (not on Wi-Fi and no Bluetooth hub nearby yet).
     if status == 424 { throw Failure("Can't reach the bulb yet. Keep your phone near it for a few seconds.") }
-    guard (200..<300).contains(status) else { throw Failure("Hubspace returned \(status)") }
+    guard (200..<300).contains(status) else {
+      // The error body says why (e.g. which field the hub join rejected).
+      note("\(status) body: " + String(decoding: data.prefix(300), as: UTF8.self))
+      throw Failure("Hubspace returned \(status)")
+    }
     return data.isEmpty ? nil : try JSONSerialization.jsonObject(with: data)
   }
 

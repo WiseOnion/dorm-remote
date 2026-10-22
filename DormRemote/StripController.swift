@@ -243,9 +243,9 @@ final class StripController: NSObject {
   private func startHandshake() {
     state = .unlocking
     rawWrite(Daybetter.frame(0x00, Daybetter.cchip))
-    // Older firmware never answers the challenge and needs no unlock.
+    // Older firmware never answers the challenge and needs no unlock. The P031 can take over 1.5 s to answer.
     handshakeTimer?.invalidate()
-    handshakeTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+    handshakeTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
       guard let self, self.state == .unlocking else { return }
       self.note("no CCHIP reply, continuing without unlock")
       self.ready()
