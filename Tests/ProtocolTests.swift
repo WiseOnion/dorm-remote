@@ -15,30 +15,28 @@ final class DaybetterTests: XCTestCase {
     XCTAssertEqual(hex(Daybetter.frame(Daybetter.brightness, [1])), "A0 13 04 01 10 E1")
   }
 
-  func testUnlockRequest() {
-    XCTAssertEqual(hex(Daybetter.frame(0x00, Daybetter.cchip)), "A0 00 08 43 43 48 49 50 AC CA")
+  // grimsteel util.py correct_color: gamma, then green * 100/255, blue * 140/255.
+  func testColorCorrection() {
+    XCTAssertEqual(Daybetter.corrected(255, 0, 0), [255, 0, 0])
+    XCTAssertEqual(Daybetter.corrected(255, 255, 255), [255, 100, 140])
+    XCTAssertEqual(Daybetter.corrected(255, 146, 39), [255, 23, 0])
   }
 
   func testRGBWColorFrame() {
     XCTAssertEqual(hex(Daybetter.frame(Daybetter.color, [0xFF, 0, 0, 0])), "A0 15 07 FF 00 00 00 3C 1B")
   }
 
-  func testEffectFrames() {
-    XCTAssertEqual(hex(Daybetter.frame(Daybetter.mode, [0x01, 0x00])), "A0 12 05 01 00 B0 F0")
-    XCTAssertEqual(hex(Daybetter.frame(Daybetter.mode, [12, 0xFF])), "A0 12 05 0C FF F4 20")
-    XCTAssertEqual(hex(Daybetter.frame(Daybetter.speed, [50])), "A0 16 04 32 40 F5")
-    XCTAssertEqual(hex(Daybetter.frame(Daybetter.rhythm, [1])), "A0 21 04 01 B1 2E")
-    XCTAssertEqual(hex(Daybetter.frame(Daybetter.mode, [Daybetter.micMode, 3])), "A0 12 05 A0 03 89 61")
+  func testEffectFrame() {
+    // grimsteel set_effect: one byte, e.g. fade slow.
+    XCTAssertEqual(hex(Daybetter.frame(Daybetter.effect, [0x0C])), "A0 12 04 0C 80 E4")
   }
 
   func testStatusReply() throws {
-    // power on, solid mode, brightness 50, color reported pre-scaled by brightness.
-    let bytes: [UInt8] = [0xA1, 0x10, 0x11, 0x01, 0x01, 0x00, 50, 30, 128, 127, 0, 64, 0xFF, 0, 0, 0, 0, 0, 0]
+    // From this strip's log: A1 10 11 01 01 00 64 …
+    let bytes: [UInt8] = [0xA1, 0x10, 0x11, 0x01, 0x01, 0x00, 0x64, 0x32, 0x32, 0xFF, 0x92, 0x27, 0xFF, 0, 0, 0, 0, 0x6E, 0x29]
     let status = try XCTUnwrap(StripStatus(bytes))
     XCTAssertTrue(status.on)
-    XCTAssertEqual(status.mode, 1)
-    XCTAssertEqual(status.brightness, 50)
-    XCTAssertEqual([status.r, status.g, status.b], [254, 0, 128])
+    XCTAssertEqual(status.brightness, 100)
     XCTAssertNil(StripStatus([0xA1, 0x13, 0x04, 0x01, 0x11, 0x1D]))
   }
 

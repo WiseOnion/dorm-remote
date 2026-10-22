@@ -14,7 +14,7 @@ private enum Ink {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, projector, log
+  case light(String), stripSetup, hubSetup, lampSetup, projector, add, log
   var id: String {
     switch self {
     case .light(let id): "light-" + id
@@ -22,6 +22,7 @@ private enum Sheet: Identifiable {
     case .hubSetup: "hub"
     case .projector: "projector"
     case .lampSetup: "lamps"
+    case .add: "add"
     case .log: "log"
     }
   }
@@ -32,29 +33,39 @@ struct ContentView: View {
   @State private var sheet: Sheet?
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 32) {
-        header
-        scenes
-        VStack(alignment: .leading, spacing: 12) {
+    // A List, so rows get the standard iOS swipe-left-to-delete.
+    List {
+      Group {
+        header.padding(.top, 16)
+        scenes.padding(.top, 16)
+        HStack {
           SectionTitle("Lights")
-          ForEach(room.items) { item in
-            LightRow(room: room, item: item) { open(item) }
-          }
-          Button { sheet = .lampSetup } label: {
-            Label("Add a Bluetooth bulb", systemImage: "plus")
-              .font(.subheadline.weight(.semibold))
-              .foregroundStyle(Ink.dim)
-              .frame(maxWidth: .infinity, minHeight: 52)
-              .background(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Ink.raised, style: StrokeStyle(lineWidth: 1.5, dash: [6])))
+          Spacer()
+          Button { sheet = .add } label: {
+            Label("Add", systemImage: "plus").font(.subheadline.weight(.semibold))
           }
           .buttonStyle(.plain)
+          .frame(minHeight: 44)
         }
+        .padding(.top, 16)
+        ForEach(room.items) { item in
+          LightRow(room: room, item: item) { open(item) }
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+              Button(role: .destructive) { room.remove(item) } label: { Label("Remove", systemImage: "trash") }
+            }
+        }
+        Text("Swipe left on a light to remove it.")
+          .font(.footnote)
+          .foregroundStyle(Ink.dim)
+          .frame(maxWidth: .infinity)
+          .padding(.bottom, 24)
       }
-      .padding(.horizontal, 20)
-      .padding(.top, 16)
-      .padding(.bottom, 40)
+      .listRowBackground(Color.clear)
+      .listRowSeparator(.hidden)
+      .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
     }
+    .listStyle(.plain)
+    .scrollContentBackground(.hidden)
     .scrollIndicators(.hidden)
     .background(glow)
     .foregroundStyle(Ink.text)
@@ -67,6 +78,18 @@ struct ContentView: View {
         case .hubSetup: HubSetup(hubspace: room.hubspace)
         case .projector: ProjectorSheet(bridge: room.bridge)
         case .lampSetup: LampSetup(lamps: room.lamps)
+        case .add: AddSheet { kind in
+          room.restore(kind)
+          // Open the new device's setup once this sheet is gone.
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            switch kind {
+            case .strip: sheet = .stripSetup
+            case .hubspace: sheet = room.hubspace.state == .ready ? nil : .hubSetup
+            case .bluetooth: sheet = .lampSetup
+            case .projector: sheet = .projector
+            }
+          }
+        }
         case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
         }
       }
@@ -546,9 +569,6 @@ private struct LightSheet: View {
 
   private var stripEffects: some View {
     VStack(alignment: .leading, spacing: 20) {
-      if case .pattern = room.effect {
-        speedSlider(Double(room.speed) / 100) { room.setSpeed(Int(($0 * 100).rounded())) }
-      }
       ForEach(Effect.patternGroups, id: \.0) { group in
         heading(group.0, "sparkles")
         LazyVGrid(columns: Self.twoColumns, spacing: 12) {
@@ -557,24 +577,8 @@ private struct LightSheet: View {
           }
         }
       }
-
       heading("Music", "waveform")
-      LazyVGrid(columns: Self.twoColumns, spacing: 12) {
-        ForEach(Effect.micStyles.indices, id: \.self) { i in
-          effectCard(Effect.micStyles[i], colors: [.pink, .purple, .cyan], active: room.effect == .stripMic(UInt8(i))) {
-            room.start(.stripMic(UInt8(i)))
-          }
-        }
-      }
-      if case .stripMic = room.effect {
-        VStack(alignment: .leading, spacing: 12) {
-          heading("Mic sensitivity", "mic")
-          PillSlider(value: Binding(get: { Double(room.sensitivity) / 255 }, set: { room.setSensitivity(Int(($0 * 255).rounded())) }),
-                     fill: AnyShapeStyle(Ink.text), label: "Mic sensitivity")
-            .frame(height: 40)
-        }
-      }
-      effectCard("Use phone mic", colors: [.white, Ink.dim], active: room.effect == .phoneMic) { room.start(.phoneMic) }
+      effectCard("Pulse to music (phone mic)", colors: [.pink, .purple, .cyan], active: room.effect == .phoneMic) { room.start(.phoneMic) }
       if room.effect == .phoneMic {
         Capsule()
           .fill(Ink.raised)
@@ -584,7 +588,7 @@ private struct LightSheet: View {
           .frame(height: 6)
           .animation(.linear(duration: 0.05), value: room.level)
       }
-      Text("Patterns and music styles run on the strip itself and use its built-in mic, so they keep going when you close the app. If the strip has no mic, use your phone's mic instead (only while the app is open).")
+      Text("Effects run on the strip itself and keep going when you close the app. Music mode listens through your phone while the app is open.")
         .font(.footnote)
         .foregroundStyle(Ink.dim)
       if let error = room.effectError {
@@ -800,6 +804,58 @@ private struct SignalBars: View {
   }
 }
 
+private struct AddSheet: View {
+  let pick: (Room.AddKind) -> Void
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Add a light").font(.system(size: 28, weight: .bold, design: .rounded)).padding(.bottom, 8)
+      ForEach(Room.AddKind.allCases) { kind in
+        Button {
+          dismiss()
+          pick(kind)
+        } label: {
+          HStack(spacing: 16) {
+            Image(systemName: icon(kind))
+              .frame(width: 44, height: 44)
+              .background(Circle().fill(Ink.raised))
+            VStack(alignment: .leading, spacing: 2) {
+              Text(kind.rawValue).font(.body.weight(.semibold))
+              Text(detail(kind)).font(.footnote).foregroundStyle(Ink.dim)
+            }
+            Spacer()
+            Image(systemName: "chevron.right").foregroundStyle(Ink.dim)
+          }
+          .padding(16)
+          .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+        }
+        .buttonStyle(.plain)
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(24)
+    .presentationDetents([.medium, .large])
+  }
+
+  private func icon(_ kind: Room.AddKind) -> String {
+    switch kind {
+    case .strip: "light.strip.2"
+    case .hubspace, .bluetooth: "lightbulb.fill"
+    case .projector: "moon.stars.fill"
+    }
+  }
+
+  private func detail(_ kind: Room.AddKind) -> String {
+    switch kind {
+    case .strip: "Bluetooth, works offline"
+    case .hubspace: "Needs the bulb on Wi-Fi"
+    case .bluetooth: "Happy Lighting or Lotus Lamp bulbs, offline"
+    case .projector: "Needs the DormBridge IR board"
+    }
+  }
+}
+
 private struct LampSetup: View {
   var lamps: BulbBank
   @Environment(\.dismiss) private var dismiss
@@ -856,7 +912,7 @@ private struct HubSetup: View {
       VStack(alignment: .leading, spacing: 20) {
         VStack(alignment: .leading, spacing: 8) {
           Text("Add your smart bulb").font(.system(size: 28, weight: .bold, design: .rounded))
-          Text("Sign in with your Hubspace account. The bulb has to be on Wi-Fi: Hubspace locks its Bluetooth, so this app reaches it through Hubspace's cloud.")
+          Text("Sign in with your Hubspace account. The bulb has to be on Wi-Fi first: Hubspace encrypts its Bluetooth, so only its own app can use that. On campus Wi-Fi, register the bulb's Wi-Fi MAC address (Hubspace app → bulb → Settings) on your school's device network, then finish Wi-Fi setup in the Hubspace app.")
             .foregroundStyle(Ink.dim)
         }
 

@@ -82,9 +82,9 @@ struct Mood: Identifiable {
   }
 }
 
-/// Strip effects. Patterns and strip-mic music run on the controller; phone-mic music runs in the app.
+/// Strip effects. Built-in effects run on the controller; phone-mic music runs in the app.
 enum Effect: Hashable {
-  case pattern(UInt8), stripMic(UInt8), phoneMic
+  case pattern(UInt8), phoneMic
 
   struct Pattern: Identifiable {
     let name: String
@@ -96,8 +96,7 @@ enum Effect: Hashable {
                         RGB(r: 0, g: 200, b: 255), RGB(r: 0, g: 0, b: 255), RGB(r: 160, g: 0, b: 255)]
   static let three = [RGB(r: 255, g: 0, b: 0), RGB(r: 0, g: 255, b: 0), RGB(r: 0, g: 0, b: 255)]
 
-  // Mode ids from the PsychedelicPalimpsest DayBetter gateway (checked live on a QC strip), in IR-remote order:
-  // 9–10 jump, 11–12 fade, 13–19 blink one color, 20–22 two-color fade, 23 flash all, 24–30 flash one color, 31–32 strobe.
+  // Effect bytes copied from grimsteel/daybetter-led-strip const.py (Effect enum), same order and names.
   static let singles: [(String, RGB)] = [
     ("Red", RGB(r: 255, g: 0, b: 0)), ("Green", RGB(r: 0, g: 255, b: 0)), ("Blue", RGB(r: 0, g: 0, b: 255)),
     ("Yellow", RGB(r: 255, g: 255, b: 0)), ("Teal", RGB(r: 0, g: 255, b: 255)), ("Purple", RGB(r: 160, g: 0, b: 255)),
@@ -105,30 +104,29 @@ enum Effect: Hashable {
   ]
   static let patternGroups: [(String, [Pattern])] = {
     let off = RGB(r: 0, g: 0, b: 0)
-    let jump: [Pattern] = [Pattern(name: "Jump 3", id: 9, colors: three), Pattern(name: "Jump 7", id: 10, colors: rainbow)]
+    let switching: [Pattern] = [Pattern(name: "Switch RGB", id: 0x09, colors: three),
+                                Pattern(name: "Switch all colors", id: 0x0A, colors: rainbow)]
     let fade: [Pattern] = [
-      Pattern(name: "Fast fade", id: 11, colors: rainbow), Pattern(name: "Slow fade", id: 12, colors: rainbow),
-      Pattern(name: "Red & green", id: 20, colors: [three[0], three[1]]),
-      Pattern(name: "Red & blue", id: 21, colors: [three[0], three[2]]),
-      Pattern(name: "Green & blue", id: 22, colors: [three[1], three[2]]),
+      Pattern(name: "Fade quick", id: 0x0B, colors: rainbow), Pattern(name: "Fade slow", id: 0x0C, colors: rainbow),
+      Pattern(name: "Fade red & green", id: 0x14, colors: [three[0], three[1]]),
+      Pattern(name: "Fade red & blue", id: 0x15, colors: [three[0], three[2]]),
+      Pattern(name: "Fade green & blue", id: 0x16, colors: [three[1], three[2]]),
     ]
     var blink: [Pattern] = []
-    var flash: [Pattern] = [Pattern(name: "Flash all", id: 23, colors: rainbow)]
+    var flash: [Pattern] = [Pattern(name: "Flash all colors", id: 0x17, colors: rainbow)]
     for (i, single) in singles.enumerated() {
-      blink.append(Pattern(name: single.0 + " blink", id: UInt8(13 + i), colors: [single.1, off]))
-      flash.append(Pattern(name: single.0 + " flash", id: UInt8(24 + i), colors: [single.1, off]))
+      blink.append(Pattern(name: "Blink " + single.0.lowercased(), id: UInt8(0x0D + i), colors: [single.1, off]))
+      flash.append(Pattern(name: "Flash " + single.0.lowercased(), id: UInt8(0x18 + i), colors: [single.1, off]))
     }
-    let strobe: [Pattern] = [Pattern(name: "Strobe", id: 31, colors: [.white, off]), Pattern(name: "Strobe 2", id: 32, colors: rainbow)]
-    return [("Jump", jump), ("Fade", fade), ("Blink", blink), ("Flash", flash), ("Strobe", strobe)]
+    let strobe: [Pattern] = [Pattern(name: "Strobe RGB", id: 0x1F, colors: three),
+                             Pattern(name: "Strobe all colors", id: 0x20, colors: rainbow)]
+    return [("Switch", switching), ("Fade", fade), ("Blink", blink), ("Flash", flash), ("Strobe", strobe)]
   }()
   static let patterns = patternGroups.flatMap(\.1)
 
-  static let micStyles = ["Classic", "Soft", "Dynamic", "Disco"]
-
   var name: String {
     switch self {
-    case .pattern(let id): Self.patterns.first { $0.id == id }?.name ?? "Pattern"
-    case .stripMic(let style): Self.micStyles[Int(style)]
+    case .pattern(let id): Self.patterns.first { $0.id == id }?.name ?? "Effect"
     case .phoneMic: "Phone mic"
     }
   }
@@ -157,14 +155,12 @@ final class Room {
   // The strip never reports its state, so remember what we last sent.
   private var stripLook: LightItem
   private var names: [String: String]
+  /// Lights swiped away. The strip, bulb, and projector rows come back from "Add".
+  private var hidden = Set(UserDefaults.standard.stringArray(forKey: "hiddenLights") ?? [])
   private var engine: AVAudioEngine?
   private var hue = 0.0
   private var lastBeat = Date.distantPast
   private var average: Double = 0
-  /// Effect speed, 1–100.
-  private(set) var speed = UserDefaults.standard.object(forKey: "speed") as? Int ?? 50
-  /// Strip mic sensitivity, 0–255.
-  private(set) var sensitivity = UserDefaults.standard.object(forKey: "sensitivity") as? Int ?? 128
 
   init(strip: StripController, hubspace: HubspaceClient, bridge: BridgeController, lamps: BulbBank) {
     self.strip = strip
@@ -189,19 +185,6 @@ final class Room {
   private func apply(_ status: StripStatus) {
     stripLook.on = status.on
     stripLook.brightness = status.brightness
-    switch status.mode {
-    case 0x01:
-      stripLook.color = RGB(r: status.r, g: status.g, b: status.b)
-      stripLook.kelvin = nil
-      if case .pattern = effect { effect = nil }
-      if case .stripMic = effect { effect = nil }
-    case Daybetter.micMode:
-      if effect != .phoneMic { effect = .stripMic(status.subMode) }
-    case let mode where Effect.patterns.contains(where: { $0.id == mode }):
-      effect = .pattern(mode)
-    default:
-      break
-    }
     saveStrip()
   }
 
@@ -244,8 +227,45 @@ final class Room {
     case .off, .searching: .setup
     }
     list.append(LightItem(id: "projector", name: names["projector"] ?? "Galaxy projector", kind: .projector, status: projectorStatus))
-    return list
+    return list.filter { !hidden.contains($0.kind == .bulb ? "hub" : $0.id) }
   }
+
+  enum AddKind: String, CaseIterable, Identifiable {
+    case strip = "DayBetter LED strip", hubspace = "Hubspace bulb", bluetooth = "Bluetooth bulb", projector = "Galaxy projector"
+    var id: String { rawValue }
+  }
+
+  /// Swipe to delete: forgets the device and removes its row.
+  func remove(_ item: LightItem) {
+    switch item.kind {
+    case .strip:
+      stopEffect()
+      strip.disconnect()
+      hidden.insert(Self.stripID)
+    case .bulb:
+      // Hubspace lights come as a set from one account.
+      hubspace.signOut()
+      hidden.insert("hub")
+    case .bleBulb:
+      lamp(item).map(lamps.remove)
+    case .projector:
+      hidden.insert("projector")
+    }
+    saveHidden()
+  }
+
+  /// Brings a removed row back; the home screen then opens its setup.
+  func restore(_ kind: AddKind) {
+    switch kind {
+    case .strip: hidden.remove(Self.stripID)
+    case .hubspace: hidden.remove("hub")
+    case .projector: hidden.remove("projector")
+    case .bluetooth: break
+    }
+    saveHidden()
+  }
+
+  private func saveHidden() { UserDefaults.standard.set(Array(hidden), forKey: "hiddenLights") }
 
   var ready: [LightItem] { items.filter { $0.status == .ready } }
 
@@ -411,10 +431,6 @@ final class Room {
     switch e {
     case .pattern(let id):
       strip.setPattern(id)
-      strip.setSpeed(speed)
-    case .stripMic(let style):
-      strip.setMicMusic(style: style)
-      strip.setSensitivity(sensitivity)
     case .phoneMic:
       Task {
         guard await AVAudioApplication.requestRecordPermission() else {
@@ -429,18 +445,6 @@ final class Room {
         }
       }
     }
-  }
-
-  func setSensitivity(_ value: Int) {
-    sensitivity = value
-    UserDefaults.standard.set(value, forKey: "sensitivity")
-    strip.setSensitivity(value)
-  }
-
-  func setSpeed(_ value: Int) {
-    speed = value
-    UserDefaults.standard.set(value, forKey: "speed")
-    strip.setSpeed(value)
   }
 
   /// Forgets the running effect. The strip leaves a built-in effect on its next color.

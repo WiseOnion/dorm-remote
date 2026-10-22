@@ -2,20 +2,40 @@ import CoreBluetooth
 import Foundation
 import Observation
 
-/// Daybetter "QC" (whole-strip RGB) controllers over Bluetooth LE.
+/// Daybetter RGB strips over Bluetooth LE, copied from grimsteel/daybetter-led-strip, which was written for this
+/// exact controller (service E031, write A031, notify F031).
 /// Frame: A0 <cmd> <payloadLen+3> <payload…> <CRC-16/MODBUS, low byte first>; replies start with A1.
-/// Protocol: DoudGeorges/daybetter-leds PROTOCOL.md, grimsteel/daybetter-led-strip, homebridge-daybetter.
 enum Daybetter {
+  static let status: UInt8 = 0x10
   static let power: UInt8 = 0x11
-  static let mode: UInt8 = 0x12
+  static let effect: UInt8 = 0x12
   static let brightness: UInt8 = 0x13
   static let color: UInt8 = 0x15
-  static let status: UInt8 = 0x10
-  static let speed: UInt8 = 0x16
-  static let sensitivity: UInt8 = 0x17
-  static let rhythm: UInt8 = 0x21
-  /// Mode id for the controller's own microphone; the sub-mode picks the style (0 Classic … 3 Disco).
-  static let micMode: UInt8 = 160
+
+  // grimsteel util.py: FastLED-derived gamma table plus per-channel calibration. The strip's green and blue
+  // LEDs are far brighter than its red, so uncorrected colors like orange come out nearly white.
+  static let gamma: [UInt8] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3,
+    3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 5, 6, 6, 6,
+    7, 7, 7, 7, 8, 8, 8, 9, 9, 9, 10, 10, 11, 11, 11, 12,
+    12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19, 19,
+    20, 20, 21, 21, 22, 23, 23, 24, 24, 25, 26, 26, 27, 28, 28, 29,
+    30, 30, 31, 32, 33, 33, 34, 35, 36, 36, 37, 38, 39, 40, 40, 41,
+    42, 43, 44, 45, 46, 47, 48, 48, 49, 50, 51, 52, 53, 54, 55, 56,
+    57, 58, 60, 61, 62, 63, 64, 65, 66, 67, 68, 70, 71, 72, 73, 74,
+    76, 77, 78, 79, 81, 82, 83, 85, 86, 87, 89, 90, 91, 93, 94, 96,
+    97, 99, 100, 102, 103, 105, 106, 108, 109, 111, 112, 114, 115, 117, 119, 120,
+    122, 124, 125, 127, 129, 130, 132, 134, 136, 137, 139, 141, 143, 145, 146, 148,
+    150, 152, 154, 156, 158, 160, 162, 164, 166, 168, 170, 172, 174, 176, 178, 180,
+    182, 184, 187, 189, 191, 193, 195, 197, 200, 202, 204, 207, 209, 211, 213, 216,
+    218, 221, 223, 225, 228, 230, 233, 235, 238, 240, 243, 245, 248, 250, 253, 255,
+  ]
+
+  static func corrected(_ r: UInt8, _ g: UInt8, _ b: UInt8) -> [UInt8] {
+    [gamma[Int(r)], UInt8(Int(gamma[Int(g)]) * 100 / 255), UInt8(Int(gamma[Int(b)]) * 140 / 255)]
+  }
 
   /// DayBetter names its strips by model code, e.g. P031_3712.
   static func looksLikeStrip(_ name: String) -> Bool {
@@ -23,7 +43,6 @@ enum Daybetter {
     return upper.wholeMatch(of: #/P0[0-9A-F]{2}_.*/#) != nil
       || ["SMART LIGHT", "MAGIC LIGHT", "DAYBETTER", "CCHIP"].contains { upper.contains($0) }
   }
-  static let cchip: [UInt8] = Array("CCHIP".utf8)
 
   /// Controller revisions use different GATT IDs. Most follow E0xx service → A0xx write / F0xx notify.
   static func characteristics(for service: CBUUID) -> (write: CBUUID, notify: CBUUID)? {
@@ -53,25 +72,16 @@ enum Daybetter {
   }
 }
 
-/// What the strip reports about itself (also after IR remote presses).
+/// What the strip reports about itself: A1 10 11 <power> … (also sent after IR remote presses).
+/// grimsteel documents only the power byte; the brightness byte matched what we sent in this strip's logs.
 struct StripStatus: Equatable {
   var on: Bool
-  var mode: UInt8
-  var subMode: UInt8
   var brightness: Int
-  /// The color as commanded, undoing the strip's brightness scaling.
-  var r: Int, g: Int, b: Int
 
-  /// Status reply: A1 10 <len> power mode subMode brightness speed sensitivity R G B W …
-  /// The strip reports R,G,B already scaled by brightness (PsychedelicPalimpsest gateway, verified on a P065).
   init?(_ bytes: [UInt8]) {
-    guard bytes.count >= 14, bytes[0] == 0xA1, bytes[1] == Daybetter.status else { return nil }
-    on = bytes[3] != 0
-    mode = bytes[4]
-    subMode = bytes[5]
+    guard bytes.count >= 7, bytes[0] == 0xA1, bytes[1] == Daybetter.status, bytes[2] == 0x11 else { return nil }
+    on = bytes[3] == 0x01
     brightness = max(1, min(100, Int(bytes[6])))
-    let unscale = { (v: UInt8) in min(255, Int((Double(v) * 100 / Double(max(1, Int(bytes[6])))).rounded())) }
-    r = unscale(bytes[9]); g = unscale(bytes[10]); b = unscale(bytes[11])
   }
 }
 
@@ -99,10 +109,8 @@ final class StripController: NSObject {
   // ponytail: one queued command per command type, newest wins, so dragging a slider never floods
   // the strip and a tap on "On" isn't dropped by a color change right after it.
   private var pending: [Data] = []
-  private var rhythmOn = false
   /// Called on the main queue whenever the strip reports its state.
   var onStatus: ((StripStatus) -> Void)?
-  private var handshakeTimer: Timer?
   private var connectTimer: Timer?
   /// The user tapped Disconnect; don't reconnect on our own.
   private var userDisconnected = false
@@ -148,34 +156,14 @@ final class StripController: NSObject {
   func setPower(_ on: Bool) { send(Daybetter.frame(Daybetter.power, [on ? 1 : 0])) }
   func setBrightness(_ percent: Int) { send(Daybetter.frame(Daybetter.brightness, [UInt8(max(1, min(100, percent)))])) }
 
-  /// Solid-color mode, then R G B W. W is the strip's white channel: FF washes every color out to white
-  /// (seen on a P031), and a 3-byte color makes the controller read a checksum byte as W. So W is always 0.
+  /// 3-byte RGB, gamma- and channel-corrected (grimsteel set_color).
   func setColor(r: UInt8, g: UInt8, b: UInt8) {
-    stopRhythm()
-    send(Daybetter.frame(Daybetter.mode, [0x01, 0x00]))
-    send(Daybetter.frame(Daybetter.color, [r, g, b, 0x00]))
+    send(Daybetter.frame(Daybetter.color, Daybetter.corrected(r, g, b)))
   }
 
-  /// Built-in patterns run on the strip itself, so they keep going after the app closes.
+  /// Built-in effects take one byte (grimsteel set_effect) and run on the strip after the app closes.
   func setPattern(_ id: UInt8) {
-    stopRhythm()
-    send(Daybetter.frame(Daybetter.mode, [id, 0xFF]))
-  }
-
-  func setSpeed(_ percent: Int) { send(Daybetter.frame(Daybetter.speed, [UInt8(max(1, min(100, percent)))])) }
-  func setSensitivity(_ value: Int) { send(Daybetter.frame(Daybetter.sensitivity, [UInt8(max(0, min(255, value)))])) }
-
-  /// Music from the microphone in the strip's controller.
-  func setMicMusic(style: UInt8) {
-    send(Daybetter.frame(Daybetter.mode, [Daybetter.micMode, style]))
-    send(Daybetter.frame(Daybetter.rhythm, [0x01]))
-    rhythmOn = true
-  }
-
-  private func stopRhythm() {
-    guard rhythmOn else { return }
-    send(Daybetter.frame(Daybetter.rhythm, [0x00]))
-    rhythmOn = false
+    send(Daybetter.frame(Daybetter.effect, [id]))
   }
 
   private func attach(_ p: CBPeripheral) {
@@ -187,7 +175,7 @@ final class StripController: NSObject {
     // CoreBluetooth waits forever for a strip that's out of range or unplugged.
     connectTimer?.invalidate()
     connectTimer = Timer.scheduledTimer(withTimeInterval: 12, repeats: false) { [weak self] _ in
-      guard let self, self.state == .connecting || self.state == .unlocking else { return }
+      guard let self, self.state == .connecting else { return }
       self.note("connection timed out")
       self.cancelConnecting()
     }
@@ -195,7 +183,6 @@ final class StripController: NSObject {
 
   private func fail(_ message: String) {
     connectTimer?.invalidate()
-    handshakeTimer?.invalidate()
     state = .failed(message)
     if let peripheral { central.cancelPeripheralConnection(peripheral) }
   }
@@ -217,65 +204,22 @@ final class StripController: NSObject {
     note("→ " + hex(data))
   }
 
-  /// Handshake writes skip the queue; nothing else is sent until the strip is unlocked.
-  private func rawWrite(_ data: Data) {
-    guard let peripheral, let writeChar else { return }
-    let type: CBCharacteristicWriteType = writeChar.properties.contains(.write) ? .withResponse : .withoutResponse
-    peripheral.writeValue(data, for: writeChar, type: type)
-    note("→ " + hex(data))
-  }
-
   private func flushPending() {
     guard !pending.isEmpty else { return }
     send(pending.removeFirst())
   }
 
   private func ready() {
-    handshakeTimer?.invalidate()
     connectTimer?.invalidate()
     state = .connected
     connectedName = peripheral?.name
     if let peripheral { UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedKey) }
     // Ask for the current state so the app matches whatever the remote or DayBetter app set.
-    send(Daybetter.frame(Daybetter.status, [0x01]))
-  }
-
-  private func startHandshake() {
-    state = .unlocking
-    rawWrite(Daybetter.frame(0x00, Daybetter.cchip))
-    // Older firmware never answers the challenge and needs no unlock. The P031 can take over 1.5 s to answer.
-    handshakeTimer?.invalidate()
-    handshakeTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
-      guard let self, self.state == .unlocking else { return }
-      self.note("no CCHIP reply, continuing without unlock")
-      self.ready()
-    }
+    send(Daybetter.frame(Daybetter.status, [0x00]))
   }
 
   private func handle(_ bytes: [UInt8]) {
-    guard bytes.count >= 4, bytes[0] == 0xA1 else { return }
-    switch bytes[1] {
-    case 0x00 where state == .unlocking && bytes.count >= 10:
-      let response = Daybetter.cchip + [bytes[8] ^ 36, bytes[9] ^ 76]
-      rawWrite(Daybetter.frame(0x01, response))
-      // This strip does use the unlock, so a missing confirmation is a failure, not old firmware.
-      handshakeTimer?.invalidate()
-      handshakeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
-        guard let self, self.state == .unlocking else { return }
-        self.fail("The strip didn't confirm the unlock. Open the log and share it.")
-      }
-    case 0x01 where state == .unlocking && bytes.count >= 9:
-      if bytes[8] == 0 {
-        note("unlocked")
-        ready()
-      } else {
-        fail("The strip rejected the unlock. Open the log and share it.")
-      }
-    case Daybetter.status:
-      if let status = StripStatus(bytes) { onStatus?(status) }
-    default:
-      break
-    }
+    if let status = StripStatus(bytes) { onStatus?(status) }
   }
 
   private func hex(_ data: Data) -> String { data.map { String(format: "%02X", $0) }.joined(separator: " ") }
@@ -332,13 +276,11 @@ extension StripController: CBCentralManagerDelegate {
   }
 
   func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-    handshakeTimer?.invalidate()
     writeChar = nil
     notifyChar = nil
     connectedName = nil
     inFlight = false
     pending = []
-    rhythmOn = false
     note("disconnected \(error?.localizedDescription ?? "")")
     // Keep an error on screen, and don't fight a scan the user started.
     if case .failed = state { return }
@@ -382,8 +324,9 @@ extension StripController: CBPeripheralDelegate {
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
     if let error { note("notify error: \(error.localizedDescription)") }
+    // grimsteel needs no unlock step: enable notifications and start sending.
     guard state == .connecting else { return }
-    startHandshake()
+    ready()
   }
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
