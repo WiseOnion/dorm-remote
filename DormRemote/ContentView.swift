@@ -14,13 +14,14 @@ private enum Ink {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, projector, log
+  case light(String), stripSetup, hubSetup, lampSetup, projector, log
   var id: String {
     switch self {
     case .light(let id): "light-" + id
     case .stripSetup: "strip"
     case .hubSetup: "hub"
     case .projector: "projector"
+    case .lampSetup: "lamps"
     case .log: "log"
     }
   }
@@ -40,6 +41,14 @@ struct ContentView: View {
           ForEach(room.items) { item in
             LightRow(room: room, item: item) { open(item) }
           }
+          Button { sheet = .lampSetup } label: {
+            Label("Add a Bluetooth bulb", systemImage: "plus")
+              .font(.subheadline.weight(.semibold))
+              .foregroundStyle(Ink.dim)
+              .frame(maxWidth: .infinity, minHeight: 52)
+              .background(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Ink.raised, style: StrokeStyle(lineWidth: 1.5, dash: [6])))
+          }
+          .buttonStyle(.plain)
         }
       }
       .padding(.horizontal, 20)
@@ -57,7 +66,8 @@ struct ContentView: View {
         case .stripSetup: StripSetup(strip: room.strip)
         case .hubSetup: HubSetup(hubspace: room.hubspace)
         case .projector: ProjectorSheet(bridge: room.bridge)
-        case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log)
+        case .lampSetup: LampSetup(lamps: room.lamps)
+        case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
         }
       }
       .presentationDragIndicator(.visible)
@@ -144,6 +154,7 @@ struct ContentView: View {
     case (_, .ready): sheet = .light(item.id)
     case (.strip, _): sheet = .stripSetup
     case (.bulb, _): sheet = .hubSetup
+    case (.bleBulb, _): sheet = .lampSetup
     }
   }
 }
@@ -200,7 +211,7 @@ private struct Orb: View {
   private var icon: String {
     switch item.kind {
     case .strip: "light.strip.2"
-    case .bulb: "lightbulb.fill"
+    case .bulb, .bleBulb: "lightbulb.fill"
     case .projector: "moon.stars.fill"
     }
   }
@@ -430,7 +441,7 @@ private struct LightSheet: View {
 
   private func modePicker(_ item: LightItem) -> some View {
     return HStack(spacing: 0) {
-      ForEach(Mode.allCases, id: \.self) { m in
+      ForEach(item.kind == .bleBulb ? [Mode.white, .color] : Mode.allCases, id: \.self) { m in
         Button { mode = m } label: {
           VStack(spacing: 8) {
             modeCircle(m)
@@ -637,11 +648,14 @@ private struct LightSheet: View {
         renaming = true
       }
       Spacer()
-      Button(item.kind == .strip ? "Forget strip" : "Sign out of Hubspace", role: .destructive) {
-        if item.kind == .strip {
+      Button(item.kind == .strip ? "Forget strip" : item.kind == .bleBulb ? "Remove bulb" : "Sign out of Hubspace", role: .destructive) {
+        switch item.kind {
+        case .strip:
           room.stopEffect()
           room.strip.disconnect()
-        } else {
+        case .bleBulb:
+          UUID(uuidString: String(item.id.dropFirst(4))).map(room.lamps.remove)
+        default:
           room.hubspace.signOut()
         }
         dismiss()
@@ -783,6 +797,50 @@ private struct SignalBars: View {
       }
     }
     .accessibilityLabel("Signal \(bars) of 3")
+  }
+}
+
+private struct LampSetup: View {
+  var lamps: BulbBank
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Add a Bluetooth bulb").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Works fully offline with bulbs made for the Happy Lighting app (they show up as Triones) or the Lotus Lamp app (ELK-BLEDOM). Close that app first.")
+            .foregroundStyle(Ink.dim)
+        }
+        if lamps.nearby.isEmpty {
+          HStack(spacing: 12) {
+            ProgressView()
+            Text("Looking for bulbs…").foregroundStyle(Ink.dim)
+          }
+        }
+        ForEach(lamps.nearby) { device in
+          Button {
+            lamps.add(device)
+            dismiss()
+          } label: {
+            HStack(spacing: 16) {
+              Image(systemName: "lightbulb.fill")
+                .frame(width: 44, height: 44)
+                .background(Circle().fill(Ink.raised))
+              Text(device.name).font(.body.weight(.semibold))
+              Spacer()
+              SignalBars(rssi: device.rssi)
+            }
+            .padding(16)
+            .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+          }
+          .buttonStyle(.plain)
+        }
+      }
+      .padding(24)
+    }
+    .onAppear { lamps.scan() }
+    .onDisappear { lamps.stopScan() }
   }
 }
 

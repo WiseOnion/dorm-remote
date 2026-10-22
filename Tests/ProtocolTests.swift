@@ -157,3 +157,28 @@ final class LookTests: XCTestCase {
     XCTAssertEqual(RGB.kelvin(6500), RGB(r: 255, g: 254, b: 250))
   }
 }
+
+final class BulbProtocolTests: XCTestCase {
+  private func hex(_ frames: [Data]) -> [String] { frames.map { $0.map { String(format: "%02X", $0) }.joined(separator: " ") } }
+
+  func testDetect() {
+    XCTAssertEqual(BulbProtocol.detect("ELK-BLEDOM"), .elk)
+    XCTAssertEqual(BulbProtocol.detect("Triones:A1B2"), .triones)
+    XCTAssertNil(BulbProtocol.detect("P031_3712"))
+  }
+
+  // Frames from madhead/saberlight (Triones) and dave-code-ruiz/elkbledom models.json (ELK-BLEDOM).
+  func testTrionesFrames() {
+    XCTAssertEqual(hex(BulbProtocol.triones.power(true)), ["CC 23 33"])
+    XCTAssertEqual(hex(BulbProtocol.triones.power(false)), ["CC 24 33"])
+    XCTAssertEqual(hex(BulbProtocol.triones.color(RGB(r: 255, g: 0, b: 0), brightness: 100)), ["56 FF 00 00 00 F0 AA"])
+    XCTAssertEqual(hex(BulbProtocol.triones.color(RGB(r: 200, g: 100, b: 0), brightness: 50)), ["56 64 32 00 00 F0 AA"])
+    XCTAssertEqual(hex(BulbProtocol.triones.white(2700, brightness: 100)), ["56 00 00 00 FF 0F AA"])
+  }
+
+  func testElkFrames() {
+    XCTAssertEqual(hex(BulbProtocol.elk.power(true)), ["7E 00 04 F0 00 01 FF 00 EF"])
+    XCTAssertEqual(hex(BulbProtocol.elk.color(RGB(r: 0, g: 0, b: 255), brightness: 40)),
+                   ["7E 00 05 03 00 00 FF 0A EF", "7E 00 01 28 00 00 00 00 EF"])
+  }
+}

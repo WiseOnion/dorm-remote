@@ -37,7 +37,7 @@ struct RGB: Equatable, Codable {
 }
 
 struct LightItem: Identifiable {
-  enum Kind { case strip, bulb, projector }
+  enum Kind { case strip, bulb, bleBulb, projector }
   enum Status: Equatable { case ready, setup, busy(String), offline(String) }
 
   let id: String
@@ -144,6 +144,7 @@ final class Room {
   let strip: StripController
   let hubspace: HubspaceClient
   let bridge: BridgeController
+  let lamps: BulbBank
 
   private(set) var effect: Effect?
   private(set) var mood: String?
@@ -163,10 +164,11 @@ final class Room {
   /// Strip mic sensitivity, 0–255.
   private(set) var sensitivity = UserDefaults.standard.object(forKey: "sensitivity") as? Int ?? 128
 
-  init(strip: StripController, hubspace: HubspaceClient, bridge: BridgeController) {
+  init(strip: StripController, hubspace: HubspaceClient, bridge: BridgeController, lamps: BulbBank) {
     self.strip = strip
     self.hubspace = hubspace
     self.bridge = bridge
+    self.lamps = lamps
     names = UserDefaults.standard.dictionary(forKey: "names") as? [String: String] ?? [:]
     stripLook = LightItem(id: Self.stripID, name: "LED strip", kind: .strip, status: .setup)
     if let data = UserDefaults.standard.data(forKey: "stripLook"),
@@ -229,6 +231,11 @@ final class Room {
     case .signingIn, .loading: list.append(placeholder(.busy("Loading")))
     case .unavailable: list.append(placeholder(.offline("Can't reach Hubspace")))
     }
+    list += lamps.bulbs.map { b in
+      LightItem(id: "ble:" + b.id.uuidString, name: names["ble:" + b.id.uuidString] ?? "Bulb", kind: .bleBulb,
+                status: lamps.connected.contains(b.id) ? .ready : .busy("Looking"),
+                on: b.on, brightness: b.brightness, color: b.color, kelvin: b.kelvin)
+    }
     let projectorStatus: LightItem.Status = switch bridge.state {
     case .ready: .ready
     case .connecting: .busy("Connecting to bridge")
@@ -276,6 +283,7 @@ final class Room {
         stripLook.on = on
         saveStrip()
       case .bulb: hub(light).map { hubspace.setPower($0, on) }
+      case .bleBulb: lamp(light).map { lamps.setPower($0, on) }
       case .projector: break
       }
     }
@@ -325,6 +333,10 @@ final class Room {
     ready.filter { $0.kind != .projector && (id == Self.all || $0.id == id) }
   }
 
+  private func lamp(_ light: LightItem) -> UUID? {
+    light.id.hasPrefix("ble:") ? UUID(uuidString: String(light.id.dropFirst(4))) : nil
+  }
+
   private func hub(_ light: LightItem) -> HubLight? {
     hubspace.lights.first { "hub:" + $0.id == light.id }
   }
@@ -337,6 +349,7 @@ final class Room {
       stripLook.brightness = value
       saveStrip()
     case .bulb: hub(light).map { hubspace.setBrightness($0, value) }
+    case .bleBulb: lamp(light).map { lamps.setBrightness($0, value) }
     case .projector: break
     }
   }
@@ -350,6 +363,7 @@ final class Room {
       stripLook.kelvin = nil
       saveStrip()
     case .bulb: hub(light).map { hubspace.setColor($0, r: c.r, g: c.g, b: c.b) }
+    case .bleBulb: lamp(light).map { lamps.setColor($0, c) }
     case .projector: break
     }
   }
@@ -364,6 +378,7 @@ final class Room {
       stripLook.kelvin = kelvin
       saveStrip()
     case .bulb: hub(light).map { hubspace.setWhite($0, kelvin: kelvin) }
+    case .bleBulb: lamp(light).map { lamps.setWhite($0, kelvin) }
     case .projector: break
     }
   }

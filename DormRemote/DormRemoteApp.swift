@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct DormRemoteApp: App {
-  @State private var room = Room(strip: StripController(), hubspace: HubspaceClient(), bridge: BridgeController())
+  @State private var room = Room(strip: StripController(), hubspace: HubspaceClient(), bridge: BridgeController(), lamps: BulbBank())
   @Environment(\.scenePhase) private var scenePhase
 
   var body: some Scene {
