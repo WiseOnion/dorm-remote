@@ -207,7 +207,7 @@ struct ContentView: View {
       }
     }
     .ignoresSafeArea()
-    .animation(reduceMotion ? nil : .easeInOut(duration: 0.6), value: room.ambient)
+    .animation(reduceMotion ? nil : .easeOut(duration: 0.4), value: room.ambient)
   }
 
   private var header: some View {
@@ -341,7 +341,7 @@ private struct Orb: View {
       .foregroundStyle(lit ? .black.opacity(0.75) : Ink.dim)
       .background(Circle().fill(lit ? item.glow.color : Ink.raised))
       .shadow(color: lit ? item.glow.color.opacity(0.8) : .clear, radius: 14)
-      .animation(.easeInOut(duration: 0.3), value: lit)
+      .animation(.easeOut(duration: 0.2), value: lit)
   }
 
   private var icon: String {
@@ -393,6 +393,7 @@ private struct LightRow: View {
           label: "Brightness"
         )
         .frame(height: 44)
+        .transition(.opacity.combined(with: .move(edge: .top)))
       }
     }
     .padding(16)
@@ -401,7 +402,7 @@ private struct LightRow: View {
     .contentShape(RoundedRectangle(cornerRadius: 24))
     .onTapGesture(perform: open)
     .sensoryFeedback(.impact(weight: .light), trigger: item.on)
-    .animation(.easeInOut(duration: 0.25), value: item.on)
+    .animation(.easeOut(duration: 0.2), value: item.on)
     .accessibilityElement(children: .contain)
     .accessibilityAction(named: "Open \(item.name)", open)
   }
@@ -612,6 +613,7 @@ private struct LightSheet: View {
         .accessibilityAddTraits(mode == m ? .isSelected : [])
       }
     }
+    .animation(.easeOut(duration: 0.15), value: mode)
     .sensoryFeedback(.selection, trigger: mode)
   }
 
