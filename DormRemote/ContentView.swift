@@ -48,11 +48,16 @@ struct ContentView: View {
           .frame(minHeight: 44)
         }
         .padding(.top, 16)
-        ForEach(room.items) { item in
-          LightRow(room: room, item: item) { open(item) }
-            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-              Button(role: .destructive) { room.remove(item) } label: { Label("Remove", systemImage: "trash") }
-            }
+        ForEach(room.mine) { item in row(item) }
+        if !room.sharedItems.isEmpty {
+          VStack(alignment: .leading, spacing: 4) {
+            SectionTitle("Shared")
+            Text("Scenes, All on/off, and schedules leave these alone.")
+              .font(.footnote)
+              .foregroundStyle(Ink.dim)
+          }
+          .padding(.top, 16)
+          ForEach(room.sharedItems) { item in row(item) }
         }
         Text("Swipe left on a light to remove it.")
           .font(.footnote)
@@ -131,12 +136,12 @@ struct ContentView: View {
       PowerButton(on: room.anyOn, tint: room.ambient ?? .white) {
         room.setPower(Room.all, !room.anyOn)
       }
-      .disabled(room.ready.isEmpty)
+      .disabled(room.myReady.isEmpty)
     }
   }
 
   private var summary: String {
-    let ready = room.ready
+    let ready = room.myReady
     if ready.isEmpty { return "Tap a light to set it up" }
     let on = ready.filter(\.on).count
     return on == 0 ? "Everything's off" : on == ready.count ? "Everything's on" : "\(on) of \(ready.count) on"
@@ -165,10 +170,17 @@ struct ContentView: View {
         }
       }
       .scrollIndicators(.hidden)
-      .disabled(room.ready.isEmpty)
-      .opacity(room.ready.isEmpty ? 0.4 : 1)
+      .disabled(room.myReady.isEmpty)
+      .opacity(room.myReady.isEmpty ? 0.4 : 1)
       .sensoryFeedback(.selection, trigger: room.mood)
     }
+  }
+
+  private func row(_ item: LightItem) -> some View {
+    LightRow(room: room, item: item) { open(item) }
+      .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+        Button(role: .destructive) { room.remove(item) } label: { Label("Remove", systemImage: "trash") }
+      }
   }
 
   private func open(_ item: LightItem) {
@@ -646,6 +658,14 @@ private struct LightSheet: View {
   }
 
   private func footer(_ item: LightItem) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+    Toggle(isOn: Binding(get: { room.isShared(item) }, set: { room.setShared(id, $0) })) {
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Shared light")
+        Text("Leave it out of scenes, All on/off, and schedules.").font(.footnote).foregroundStyle(Ink.dim)
+      }
+    }
+    .tint(item.glow.color)
     HStack {
       Button("Rename") {
         newName = item.name
@@ -667,6 +687,7 @@ private struct LightSheet: View {
     }
     .font(.subheadline)
     .frame(minHeight: 44)
+    }
   }
 }
 

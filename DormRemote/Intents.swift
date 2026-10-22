@@ -17,7 +17,7 @@ enum SceneChoice: String, AppEnum {
 /// Waits briefly for lights to reconnect after a background launch.
 @MainActor
 private func waitForLights() async {
-  for _ in 0..<40 where Room.shared.ready.isEmpty || Room.shared.strip.hasSaved && Room.shared.strip.state != .connected {
+  for _ in 0..<40 where Room.shared.myReady.isEmpty || Room.shared.strip.hasSaved && Room.shared.strip.state != .connected {
     try? await Task.sleep(for: .milliseconds(250))
   }
 }

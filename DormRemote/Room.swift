@@ -155,6 +155,8 @@ final class Room {
   // The strip never reports its state, so remember what we last sent.
   private var stripLook: LightItem
   private var names: [String: String]
+  /// Per-light choice: true = shared with roommates (kept out of scenes, All on/off, and schedules).
+  private var sharedChoice = UserDefaults.standard.dictionary(forKey: "sharedLights") as? [String: Bool] ?? [:]
   /// Lights swiped away. The strip, bulb, and projector rows come back from "Add".
   private var hidden = Set(UserDefaults.standard.stringArray(forKey: "hiddenLights") ?? [])
   private var engine: AVAudioEngine?
@@ -201,7 +203,7 @@ final class Room {
     case .idle, .scanning: self.strip.hasSaved ? .busy("Looking") : .setup
     }
 
-    var list = [strip]
+    var list: [LightItem] = []
     let placeholder = { (status: LightItem.Status) in
       LightItem(id: "hub", name: "Smart bulb", kind: .bulb, status: status)
     }
@@ -221,6 +223,7 @@ final class Room {
                 status: lamps.connected.contains(b.id) ? .ready : .busy("Looking"),
                 on: b.on, brightness: b.brightness, color: b.color, kelvin: b.kelvin)
     }
+    list.append(strip)
     let projectorStatus: LightItem.Status = switch bridge.state {
     case .ready: .ready
     case .connecting: .busy("Connecting to bridge")
@@ -269,18 +272,33 @@ final class Room {
 
   var ready: [LightItem] { items.filter { $0.status == .ready } }
 
+  /// Shared lights (a living room bulb in a suite) default to shared by name; the light's sheet can change it.
+  func isShared(_ item: LightItem) -> Bool {
+    sharedChoice[item.id] ?? item.name.lowercased().contains("living")
+  }
+
+  func setShared(_ id: String, _ shared: Bool) {
+    sharedChoice[id] = shared
+    UserDefaults.standard.set(sharedChoice, forKey: "sharedLights")
+  }
+
+  var mine: [LightItem] { items.filter { !isShared($0) } }
+  var sharedItems: [LightItem] { items.filter(isShared) }
+  /// What room-wide controls act on: your own lights that are connected.
+  var myReady: [LightItem] { ready.filter { !isShared($0) } }
+
   func item(_ id: String) -> LightItem? { items.first { $0.id == id } }
 
   /// What a control sheet shows: one light, or the first ready one standing in for the room.
   func look(_ id: String) -> LightItem? {
-    id == Self.all ? (ready.first { $0.on } ?? ready.first) : item(id)
+    id == Self.all ? (myReady.first { $0.on } ?? myReady.first) : item(id)
   }
 
-  var anyOn: Bool { ready.contains { $0.on } }
+  var anyOn: Bool { myReady.contains { $0.on } }
 
   /// The background glow: the color of whatever is on.
   var ambient: Color? {
-    let on = ready.filter(\.on)
+    let on = myReady.filter(\.on)
     guard !on.isEmpty else { return nil }
     let n = Double(on.count)
     let sum = on.reduce((0.0, 0.0, 0.0)) { ($0.0 + Double($1.glow.r), $0.1 + Double($1.glow.g), $0.2 + Double($1.glow.b)) }
@@ -339,7 +357,7 @@ final class Room {
 
   func apply(_ m: Mood) {
     stopEffect()
-    for light in ready where light.kind != .projector {
+    for light in myReady where light.kind != .projector {
       brightness(light, m.brightness)
       switch m.look {
       case .color(let c): paint(light, c)
@@ -347,12 +365,12 @@ final class Room {
       case .party: paint(light, RGB(r: 255, g: 0, b: 180))
       }
     }
-    if case .party = m.look, ready.contains(where: { $0.kind == .strip }) { start(.pattern(10)) }
+    if case .party = m.look, myReady.contains(where: { $0.kind == .strip }) { start(.pattern(10)) }
     mood = m.id
   }
 
   private func targets(_ id: String) -> [LightItem] {
-    ready.filter { $0.kind != .projector && (id == Self.all || $0.id == id) }
+    (id == Self.all ? myReady : ready.filter { $0.id == id }).filter { $0.kind != .projector }
   }
 
   private func lamp(_ light: LightItem) -> UUID? {
