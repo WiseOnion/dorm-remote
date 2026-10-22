@@ -49,6 +49,9 @@ struct LightItem: Identifiable {
   var color = RGB.white
   /// Set while the light is in white mode.
   var kelvin: Int?
+  /// Bulb only: the running built-in effect and its speed (-10…10). The strip's effect lives on Room.
+  var effect: String?
+  var speed = 0
 
   var glow: RGB { kelvin.map(RGB.kelvin) ?? color }
 }
@@ -93,15 +96,29 @@ enum Effect: Hashable {
                         RGB(r: 0, g: 200, b: 255), RGB(r: 0, g: 0, b: 255), RGB(r: 160, g: 0, b: 255)]
   static let three = [RGB(r: 255, g: 0, b: 0), RGB(r: 0, g: 255, b: 0), RGB(r: 0, g: 0, b: 255)]
 
-  // Mode ids from DoudGeorges/daybetter-leds PROTOCOL.md (QC family).
-  static let patterns = [
-    Pattern(name: "Rainbow fade", id: 12, colors: rainbow),
-    Pattern(name: "Rainbow jump", id: 10, colors: rainbow),
-    Pattern(name: "RGB fade", id: 11, colors: three),
-    Pattern(name: "RGB jump", id: 9, colors: three),
-    Pattern(name: "Strobe", id: 23, colors: rainbow),
-    Pattern(name: "Red pulse", id: 13, colors: [RGB(r: 255, g: 0, b: 0), RGB(r: 60, g: 0, b: 0)]),
+  // Mode ids from DoudGeorges/daybetter-leds PROTOCOL.md (QC family): 9–10 jump, 11–22 fade, 23–30 strobe.
+  // ponytail: the protocol doc gives the single-color modes as a range without naming each color;
+  // the order below is the usual one for these controllers. Swap names if the strip shows otherwise.
+  static let singles: [(String, RGB)] = [
+    ("Red", RGB(r: 255, g: 0, b: 0)), ("Green", RGB(r: 0, g: 255, b: 0)), ("Blue", RGB(r: 0, g: 0, b: 255)),
+    ("Yellow", RGB(r: 255, g: 255, b: 0)), ("Cyan", RGB(r: 0, g: 255, b: 255)), ("Purple", RGB(r: 160, g: 0, b: 255)),
+    ("White", RGB(r: 255, g: 255, b: 255)),
   ]
+  static let patternGroups: [(String, [Pattern])] = {
+    let off = RGB(r: 0, g: 0, b: 0)
+    let jump: [Pattern] = [Pattern(name: "Jump 3", id: 9, colors: three), Pattern(name: "Jump 7", id: 10, colors: rainbow)]
+    var fade: [Pattern] = [Pattern(name: "Fade 3", id: 11, colors: three), Pattern(name: "Fade 7", id: 12, colors: rainbow)]
+    var strobe: [Pattern] = [Pattern(name: "Strobe 7", id: 23, colors: rainbow)]
+    for (i, single) in singles.enumerated() {
+      fade.append(Pattern(name: single.0 + " fade", id: UInt8(13 + i), colors: [single.1, off]))
+      strobe.append(Pattern(name: single.0 + " strobe", id: UInt8(24 + i), colors: [single.1, off]))
+    }
+    fade.append(Pattern(name: "Red & green", id: 20, colors: [three[0], three[1]]))
+    fade.append(Pattern(name: "Red & blue", id: 21, colors: [three[0], three[2]]))
+    fade.append(Pattern(name: "Green & blue", id: 22, colors: [three[1], three[2]]))
+    return [("Jump", jump), ("Fade", fade), ("Strobe", strobe)]
+  }()
+  static let patterns = patternGroups.flatMap(\.1)
 
   static let micStyles = ["Classic", "Soft", "Dynamic", "Disco"]
 
@@ -175,7 +192,8 @@ final class Room {
     case .ready:
       list += hubspace.lights.map { l in
         LightItem(id: "hub:" + l.id, name: names["hub:" + l.id] ?? l.name, kind: .bulb, status: .ready,
-                  on: l.on, brightness: l.brightness, color: RGB(r: l.r, g: l.g, b: l.b), kelvin: l.kelvin)
+                  on: l.on, brightness: l.brightness, color: RGB(r: l.r, g: l.g, b: l.b), kelvin: l.kelvin,
+                  effect: l.effect, speed: l.speed)
       }
     case .signedOut, .loginFailed, .needsCode: list.append(placeholder(.setup))
     case .signingIn, .loading: list.append(placeholder(.busy("Loading")))
@@ -243,6 +261,15 @@ final class Room {
     mood = nil
     if targets(id).contains(where: { $0.kind == .strip }) { stopEffect() }
     for light in targets(id) { white(light, kelvin) }
+  }
+
+  func setBulbEffect(_ id: String, _ effect: String) {
+    mood = nil
+    item(id).flatMap(hub).map { hubspace.setEffect($0, effect) }
+  }
+
+  func setBulbSpeed(_ id: String, _ speed: Int) {
+    item(id).flatMap(hub).map { hubspace.setEffectSpeed($0, speed) }
   }
 
   func apply(_ m: Mood) {

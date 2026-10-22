@@ -253,10 +253,11 @@ private struct LightRow: View {
     case .ready:
       guard item.on else { return "Off" }
       if item.kind == .strip, let effect = room.effect { return effect.name }
+      if let effect = item.effect { return HubspaceClient.effectName(effect) }
       return item.kelvin.map { "\($0)K white" } ?? "Color"
-    case .setup: item.kind == .projector ? "Needs an IR bridge" : "Tap to set up"
-    case .busy(let s): s + "…"
-    case .offline(let s): s
+    case .setup: return item.kind == .projector ? "Needs an IR bridge" : "Tap to set up"
+    case .busy(let s): return s + "…"
+    case .offline(let s): return s
     }
   }
 
@@ -385,10 +386,11 @@ private struct LightSheet: View {
           switch mode {
           case .white: whiteControls(item)
           case .color: colorControls(item)
-          case .effects: effectControls
+          case .effects:
+            if item.kind == .strip { stripEffects } else { bulbEffects(item) }
           }
 
-          if item.kind == .bulb, mode != .effects {
+          if item.kind == .bulb {
             Text("The bulb takes commands through Hubspace's cloud, so it has to be on Wi-Fi. Changes can take a second.")
               .font(.footnote)
               .foregroundStyle(Ink.dim)
@@ -400,7 +402,8 @@ private struct LightSheet: View {
         .padding(.top, 8)
       }
       .onAppear {
-        mode = item.kind == .strip && room.effect != nil ? .effects : item.kelvin != nil ? .white : .color
+        let inEffect = item.kind == .strip ? room.effect != nil : item.effect != nil
+        mode = inEffect ? .effects : item.kelvin != nil ? .white : .color
       }
       .alert("Rename", isPresented: $renaming) {
         TextField("Name", text: $newName)
@@ -414,9 +417,8 @@ private struct LightSheet: View {
   }
 
   private func modePicker(_ item: LightItem) -> some View {
-    let modes: [Mode] = item.kind == .strip ? Mode.allCases : [.white, .color]
     return HStack(spacing: 0) {
-      ForEach(modes, id: \.self) { m in
+      ForEach(Mode.allCases, id: \.self) { m in
         Button { mode = m } label: {
           VStack(spacing: 8) {
             modeCircle(m)
@@ -503,39 +505,45 @@ private struct LightSheet: View {
     }
   }
 
-  private var effectControls: some View {
+  private static let twoColumns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+
+  private func heading(_ title: String, _ icon: String) -> some View {
+    Label(title, systemImage: icon)
+      .font(.subheadline.weight(.semibold))
+      .foregroundStyle(Ink.dim)
+  }
+
+  private func speedSlider(_ value: Double, _ set: @escaping (Double) -> Void) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      heading("Speed", "gauge.with.dots.needle.50percent")
+      PillSlider(value: Binding(get: { value }, set: set), fill: AnyShapeStyle(Ink.text), label: "Speed")
+        .frame(height: 40)
+    }
+  }
+
+  private var stripEffects: some View {
     VStack(alignment: .leading, spacing: 20) {
-      Label("Patterns", systemImage: "sparkles")
-        .font(.subheadline.weight(.semibold))
-        .foregroundStyle(Ink.dim)
-      LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-        ForEach(Effect.patterns) { p in
-          effectCard(p.name, colors: p.colors.map(\.color), effect: .pattern(p.id))
-        }
-      }
       if case .pattern = room.effect {
-        VStack(alignment: .leading, spacing: 12) {
-          Label("Speed", systemImage: "gauge.with.dots.needle.50percent")
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(Ink.dim)
-          PillSlider(
-            value: Binding(get: { Double(room.speed) / 100 }, set: { room.setSpeed(Int(($0 * 100).rounded())) }),
-            fill: AnyShapeStyle(Ink.text),
-            label: "Speed"
-          )
-          .frame(height: 40)
+        speedSlider(Double(room.speed) / 100) { room.setSpeed(Int(($0 * 100).rounded())) }
+      }
+      ForEach(Effect.patternGroups, id: \.0) { group in
+        heading(group.0, "sparkles")
+        LazyVGrid(columns: Self.twoColumns, spacing: 12) {
+          ForEach(group.1) { p in
+            effectCard(p.name, colors: p.colors.map(\.color), active: room.effect == .pattern(p.id)) { room.start(.pattern(p.id)) }
+          }
         }
       }
 
-      Label("Music", systemImage: "waveform")
-        .font(.subheadline.weight(.semibold))
-        .foregroundStyle(Ink.dim)
-      LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+      heading("Music", "waveform")
+      LazyVGrid(columns: Self.twoColumns, spacing: 12) {
         ForEach(Effect.micStyles.indices, id: \.self) { i in
-          effectCard(Effect.micStyles[i], colors: [.pink, .purple, .cyan], effect: .stripMic(UInt8(i)))
+          effectCard(Effect.micStyles[i], colors: [.pink, .purple, .cyan], active: room.effect == .stripMic(UInt8(i))) {
+            room.start(.stripMic(UInt8(i)))
+          }
         }
       }
-      effectCard("Use phone mic", colors: [.white, Ink.dim], effect: .phoneMic)
+      effectCard("Use phone mic", colors: [.white, Ink.dim], active: room.effect == .phoneMic) { room.start(.phoneMic) }
       if room.effect == .phoneMic {
         Capsule()
           .fill(Ink.raised)
@@ -554,9 +562,38 @@ private struct LightSheet: View {
     }
   }
 
-  private func effectCard(_ name: String, colors: [Color], effect: Effect) -> some View {
-    let active = room.effect == effect
-    return Button { room.start(effect) } label: {
+  private static let bulbSwatches: [String: [Color]] = [
+    "rainbow": Effect.rainbow.map(\.color), "fade-3": Effect.three.map(\.color), "jump-3": Effect.three.map(\.color),
+    "fade-7": Effect.rainbow.map(\.color), "jump-7": Effect.rainbow.map(\.color), "flash": [.white, .black],
+    "christmas": [.red, .green, .white], "july-4th": [.red, .white, .blue], "valentines-day": [.pink, .red, .white],
+    "chill": [RGB.kelvin(2700).color, RGB.kelvin(2200).color], "sleep": [RGB.kelvin(2200).color, .black],
+    "wake-up": [RGB.kelvin(2200).color, .white], "moonlight": [Color(hex: 0x6E8BFF), Color(hex: 0x1A1F4A)],
+    "nightlight": [Color(hex: 0xFF5A1F), .black], "dinner-party": [RGB.kelvin(2700).color, Color(hex: 0xFF9F1C)],
+  ]
+
+  private func bulbEffects(_ item: LightItem) -> some View {
+    VStack(alignment: .leading, spacing: 20) {
+      if item.effect != nil {
+        speedSlider(Double(item.speed + 10) / 20) { room.setBulbSpeed(id, Int(($0 * 20).rounded()) - 10) }
+      }
+      ForEach(HubspaceClient.effectGroups, id: \.0) { group in
+        heading(group.0, group.0 == "Holidays" ? "gift" : "sparkles")
+        LazyVGrid(columns: Self.twoColumns, spacing: 12) {
+          ForEach(group.1, id: \.id) { e in
+            effectCard(e.name, colors: Self.bulbSwatches[e.id] ?? [.white, RGB.kelvin(5000).color], active: item.effect == e.id) {
+              room.setBulbEffect(id, e.id)
+            }
+          }
+        }
+      }
+      Text("These run on the bulb itself, so they keep going after you close the app.")
+        .font(.footnote)
+        .foregroundStyle(Ink.dim)
+    }
+  }
+
+  private func effectCard(_ name: String, colors: [Color], active: Bool, _ action: @escaping () -> Void) -> some View {
+    Button(action: action) {
       HStack(spacing: 12) {
         Circle()
           .fill(AngularGradient(colors: colors + [colors[0]], center: .center))

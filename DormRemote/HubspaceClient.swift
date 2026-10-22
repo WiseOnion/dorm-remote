@@ -15,6 +15,10 @@ struct HubLight: Identifiable {
   var instances: [String: String?]
   /// Set while the bulb is in white mode.
   var kelvin: Int? = nil
+  /// Set while the bulb runs one of its built-in effects (color-mode "sequence").
+  var effect: String? = nil
+  /// Effect speed, -10 (slow) to 10 (fast); 0 is normal.
+  var speed = 0
 }
 
 @MainActor
@@ -241,14 +245,49 @@ final class HubspaceClient: NSObject {
     send(light, key: "brightness", [("power", "on"), ("brightness", value)])
   }
 
+  /// Built-in effects, as the bulb lists them (aioafero sample data for the EcoSmart A19/A21 color bulbs).
+  /// Hubspace files the first five under "preset" and the rest under "custom".
+  static let presetEffects: Set<String> = ["flash", "fade-3", "fade-7", "jump-3", "jump-7"]
+  static let effectGroups: [(String, [(id: String, name: String)])] = [
+    ("Fun patterns", [("rainbow", "Rainbow"), ("fade-3", "Fade 3"), ("fade-7", "Fade 7"),
+                      ("jump-3", "Jump 3"), ("jump-7", "Jump 7"), ("flash", "Flash")]),
+    ("Moods", [("chill", "Chill"), ("clarity", "Clarity"), ("dinner-party", "Dinner Party"), ("focus", "Focus"),
+               ("getting-ready", "Getting Ready"), ("moonlight", "Moonlight"), ("nightlight", "Night Light"),
+               ("sleep", "Sleep"), ("wake-up", "Wake Up")]),
+    ("Holidays", [("christmas", "Christmas"), ("july-4th", "July 4th"), ("valentines-day", "Valentine's Day")]),
+  ]
+
+  static func effectName(_ id: String) -> String {
+    effectGroups.flatMap(\.1).first { $0.id == id }?.name ?? id.capitalized
+  }
+
+  func setEffect(_ light: HubLight, _ effect: String) {
+    update(light.id) { $0.effect = effect; $0.kelvin = nil; $0.on = true }
+    let preset = Self.presetEffects.contains(effect)
+    var values: [(String, String?, Any)] = [
+      ("power", inst(light, "power"), "on"),
+      ("color-mode", inst(light, "color-mode"), "sequence"),
+      ("color-sequence", "preset", preset ? effect : "custom"),
+    ]
+    if !preset { values.append(("color-sequence", "custom", effect)) }
+    send(light, key: "color", entries: values)
+  }
+
+  func setEffectSpeed(_ light: HubLight, _ speed: Int) {
+    update(light.id) { $0.speed = speed }
+    send(light, key: "speed", entries: [("speed", "color-sequence", max(-10, min(10, speed)))])
+  }
+
+  private func inst(_ light: HubLight, _ cls: String) -> String? { light.instances[cls] ?? nil }
+
   func setColor(_ light: HubLight, r: Int, g: Int, b: Int) {
-    update(light.id) { $0.r = r; $0.g = g; $0.b = b; $0.on = true; $0.kelvin = nil }
+    update(light.id) { $0.r = r; $0.g = g; $0.b = b; $0.on = true; $0.kelvin = nil; $0.effect = nil }
     send(light, key: "color", [("power", "on"), ("color-mode", "color"), ("color-rgb", ["color-rgb": ["r": r, "g": g, "b": b]])])
   }
 
   /// Tunable white, 2200–6500 K on the EcoSmart RGBW bulbs. Shares the color slot so the last pick wins.
   func setWhite(_ light: HubLight, kelvin: Int) {
-    update(light.id) { $0.kelvin = kelvin; $0.on = true }
+    update(light.id) { $0.kelvin = kelvin; $0.on = true; $0.effect = nil }
     send(light, key: "color", [("power", "on"), ("color-mode", "white"), ("color-temperature", kelvin)])
   }
 
@@ -259,9 +298,13 @@ final class HubspaceClient: NSObject {
   /// The cloud is slow, so drags send once they pause. Each kind of change waits separately,
   /// so a color change isn't dropped by a brightness change right after it.
   private func send(_ light: HubLight, key: String, _ values: [(String, Any)], delay: Int = 250) {
+    send(light, key: key, entries: values.map { ($0.0, inst(light, $0.0), $0.1) }, delay: delay)
+  }
+
+  private func send(_ light: HubLight, key: String, entries: [(String, String?, Any)], delay: Int = 250) {
     let slot = light.id + key
     pendingSends[slot]?.cancel()
-    let body = Self.stateBody(light, values, now: Int(Date().timeIntervalSince1970 * 1000))
+    let body = Self.stateBody(light.id, entries, now: Int(Date().timeIntervalSince1970 * 1000))
     pendingSends[slot] = Task {
       if delay > 0 { try? await Task.sleep(for: .milliseconds(delay)) }
       guard !Task.isCancelled, let accountID else { return }
@@ -313,6 +356,7 @@ final class HubspaceClient: NSObject {
     var light = HubLight(id: id, name: dev["friendlyName"] as? String ?? "Light", on: false, brightness: 100, r: 255, g: 255, b: 255, instances: [:])
     var mode: String?
     var temperature: Int?
+    var sequence: [String: String] = [:]
     for s in (dev["state"] as? [String: Any])?["values"] as? [[String: Any]] ?? [] {
       guard let cls = s["functionClass"] as? String else { continue }
       if light.instances[cls] == nil { light.instances.updateValue(s["functionInstance"] as? String, forKey: cls) }
@@ -326,22 +370,32 @@ final class HubspaceClient: NSObject {
         light.b = (rgb["b"] as? NSNumber)?.intValue ?? 255
       case "color-mode": mode = s["value"] as? String
       case "color-temperature": temperature = (s["value"] as? NSNumber)?.intValue
+      case "color-sequence":
+        if let instance = s["functionInstance"] as? String, let value = s["value"] as? String { sequence[instance] = value }
+      case "speed" where s["functionInstance"] as? String == "color-sequence":
+        light.speed = (s["value"] as? NSNumber)?.intValue ?? 0
       default: break
       }
     }
     if mode == "white" { light.kelvin = temperature ?? 2700 }
+    if mode == "sequence", let preset = sequence["preset"] {
+      light.effect = preset == "custom" ? sequence["custom"] : preset
+    }
     return light
   }
 
   static func stateBody(_ light: HubLight, _ values: [(String, Any)], now: Int) -> [String: Any] {
-    let states: [[String: Any]] = values.map { pair in
-      let instance: String? = light.instances[pair.0] ?? nil
-      return ["functionClass": pair.0,
-              "functionInstance": instance.map { $0 as Any } ?? NSNull(),
-              "value": pair.1,
-              "lastUpdateTime": now]
+    stateBody(light.id, values.map { ($0.0, light.instances[$0.0] ?? nil, $0.1) }, now: now)
+  }
+
+  static func stateBody(_ id: String, _ entries: [(String, String?, Any)], now: Int) -> [String: Any] {
+    let states: [[String: Any]] = entries.map { cls, instance, value in
+      ["functionClass": cls,
+       "functionInstance": instance.map { $0 as Any } ?? NSNull(),
+       "value": value,
+       "lastUpdateTime": now]
     }
-    return ["metadeviceId": light.id, "values": states]
+    return ["metadeviceId": id, "values": states]
   }
 
   // MARK: Helpers
