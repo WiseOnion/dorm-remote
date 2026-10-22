@@ -74,6 +74,7 @@ final class BridgeController: NSObject {
   private var central: CBCentralManager!
   private var peripheral: CBPeripheral?
   private var writeChar: CBCharacteristic?
+  private var connectTimer: Timer?
 
   override init() {
     super.init()
@@ -99,6 +100,7 @@ final class BridgeController: NSObject {
 
   /// The next code the bridge's IR receiver sees gets saved for this button.
   func learn(_ button: IRButton, device: UUID) {
+    guard state == .ready else { return }
     learning = Self.key(device, button)
     write([0x10])
   }
@@ -143,6 +145,13 @@ extension BridgeController: CBCentralManagerDelegate {
     peripheral.delegate = self
     state = .connecting
     central.connect(peripheral)
+    // CoreBluetooth waits forever on a board that went out of range mid-connect.
+    connectTimer?.invalidate()
+    connectTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
+      guard let self, self.state == .connecting else { return }
+      central.cancelPeripheralConnection(peripheral)
+      self.scan()
+    }
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -172,6 +181,7 @@ extension BridgeController: CBPeripheralDelegate {
     writeChar = chars.first { $0.uuid == Self.commandChar }
     if let reply = chars.first(where: { $0.uuid == Self.replyChar }) { peripheral.setNotifyValue(true, for: reply) }
     if writeChar != nil {
+      connectTimer?.invalidate()
       state = .ready
       note("connected")
     }

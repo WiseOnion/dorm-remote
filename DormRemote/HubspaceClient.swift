@@ -242,7 +242,7 @@ final class HubspaceClient: NSObject {
   /// or by the bulb itself. Skipped while a command is waiting, so it can't undo a change you just made.
   func refresh() async {
     guard state == .ready, let accountID, pendingSends.isEmpty else { return }
-    guard let list = try? await api("GET", K.dataHost + "/v1/accounts/\(accountID)/metadevices?expansions=state,capabilities,semantics") as? [[String: Any]],
+    guard let list = try? await api("GET", K.dataHost + "/v1/accounts/\(accountID)/metadevices?expansions=state,capabilities,semantics", quiet: true) as? [[String: Any]],
           pendingSends.isEmpty else { return }
     lights = list.compactMap(Self.parseLight)
   }
@@ -345,7 +345,8 @@ final class HubspaceClient: NSObject {
     }
   }
 
-  private func api(_ method: String, _ url: String, json: [String: Any]? = nil, retried: Bool = false) async throws -> Any? {
+  /// `quiet` skips logging successful calls, so the 15 s refresh doesn't bury the log.
+  private func api(_ method: String, _ url: String, json: [String: Any]? = nil, retried: Bool = false, quiet: Bool = false) async throws -> Any? {
     var req = URLRequest(url: URL(string: url)!)
     req.httpMethod = method
     req.setValue("Bearer \(try await bearer(forceRefresh: retried))", forHTTPHeaderField: "Authorization")
@@ -356,9 +357,9 @@ final class HubspaceClient: NSObject {
     }
     let (data, resp) = try await URLSession.shared.data(for: req)
     let status = Self.status(resp)
-    note("\(method) \(URL(string: url)?.path ?? "") \(status)")
+    if !quiet || !(200..<300).contains(status) { note("\(method) \(URL(string: url)?.path ?? "") \(status)") }
     // A token can be rejected before its stated expiry; refresh once and retry.
-    if status == 401, !retried { return try await api(method, url, json: json, retried: true) }
+    if status == 401, !retried { return try await api(method, url, json: json, retried: true, quiet: quiet) }
     // 424: Hubspace can't reach the bulb because it isn't on Wi-Fi.
     if status == 424 { throw Failure("The bulb is offline. Finish its Wi-Fi setup in the Hubspace app.") }
     guard (200..<300).contains(status) else {

@@ -202,7 +202,7 @@ struct ContentView: View {
   }
 
   private var summary: String {
-    let ready = room.roomReady
+    let ready = room.roomReady.filter { $0.caps.contains(.power) }
     if ready.isEmpty { return "Tap a light to set it up" }
     let on = ready.filter(\.on).count
     return on == 0 ? "Everything's off" : on == ready.count ? "Everything's on" : "\(on) of \(ready.count) on"
