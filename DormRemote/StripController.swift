@@ -163,13 +163,41 @@ final class StripController: NSObject {
   func setPower(_ on: Bool) { send(Daybetter.frame(Daybetter.power, [on ? 1 : 0])) }
   func setBrightness(_ percent: Int) { send(Daybetter.frame(Daybetter.brightness, [UInt8(max(1, min(100, percent)))])) }
 
-  /// 3-byte RGB, gamma- and channel-corrected (grimsteel set_color).
-  func setColor(r: UInt8, g: UInt8, b: UInt8) {
-    send(Daybetter.frame(Daybetter.color, Daybetter.corrected(r, g, b, balance: balance)))
+  /// How long a color change takes, to match the Hubspace bulbs' built-in fade (about 2 s).
+  static let fadeTime = 2.0
+  /// The color on the strip right now, nil when unknown (just connected, or an effect is running).
+  private var shown: [Double]?
+  private var fadeTimer: Timer?
+
+  /// 3-byte RGB, gamma- and channel-corrected (grimsteel set_color). Fades from the current color like the bulbs do;
+  /// the strip has no fade of its own, so the app sends steps. Queued steps coalesce, so a slow link just skips frames.
+  func setColor(r: UInt8, g: UInt8, b: UInt8, fade: Bool = true) {
+    fadeTimer?.invalidate()
+    let target = [Double(r), Double(g), Double(b)]
+    guard fade, let from = shown, from != target else {
+      show(target)
+      return
+    }
+    let start = Date()
+    fadeTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] timer in
+      guard let self else { return timer.invalidate() }
+      let p = min(1, Date().timeIntervalSince(start) / Self.fadeTime)
+      let eased = p * p * (3 - 2 * p)
+      self.show(zip(from, target).map { $0 + ($1 - $0) * eased })
+      if p >= 1 { timer.invalidate() }
+    }
+  }
+
+  private func show(_ c: [Double]) {
+    shown = c
+    let byte = { (v: Double) in UInt8(max(0, min(255, v.rounded()))) }
+    send(Daybetter.frame(Daybetter.color, Daybetter.corrected(byte(c[0]), byte(c[1]), byte(c[2]), balance: balance)))
   }
 
   /// Built-in effects take one byte (grimsteel set_effect) and run on the strip after the app closes.
   func setPattern(_ id: UInt8) {
+    fadeTimer?.invalidate()
+    shown = nil
     send(Daybetter.frame(Daybetter.effect, [id]))
   }
 
@@ -217,6 +245,7 @@ final class StripController: NSObject {
   }
 
   private func ready() {
+    shown = nil
     connectTimer?.invalidate()
     state = .connected
     connectedName = peripheral?.name

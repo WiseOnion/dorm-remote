@@ -355,7 +355,8 @@ final class Room {
 
   func setStripBalance(_ balance: [Double], resend c: RGB) {
     strip.balance = balance
-    if let light = myReady.first(where: { $0.kind == .strip }) { paint(light, c) }
+    // Instant, so slider moves show right away.
+    if myReady.contains(where: { $0.kind == .strip }) { strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
   }
 
   func setBulbEffect(_ id: String, _ effect: String) {
@@ -519,7 +520,7 @@ final class Room {
       lastBeat = Date()
       hue += 0.13
       let c = RGB.hue(hue)
-      strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b))
+      strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false)
     }
     strip.setBrightness(Int(8 + level * 92))
   }
