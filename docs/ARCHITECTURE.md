@@ -64,7 +64,7 @@ iPhone (Dorm Remote) ──┤                                             │
 |---|---|
 | Free Apple ID apps expire after 7 days | Install **SideStore** with iloader once; it refreshes on the phone over LocalDevVPN, no PC. Or a $99/yr developer account (1-year signing). |
 | Apple's sign-in block on sideloading tools (Oct 2026, error -80045/-80046) | iloader 2.3.10. Pick a working anisette server (StikStore or Jkcoxson) **before** signing in: iloader fixes the server at login (`account.rs`), so changing it later needs Sign Out → Sign In. Sideloadly 0.71 still fails. |
-| No timers while the app is closed | Built-in effects run on the lights themselves. For schedules, add App Intents and use **Shortcuts → Automation → Time of Day → Run Immediately** (next step). |
+| No timers while the app is closed | Built-in effects run on the lights themselves. Schedules: the app ships Shortcuts actions (Turn lights on/off, Set scene); use **Shortcuts → Automation → Time of Day → Run Immediately**. |
 | BLE is one connection per strip | The app releases nothing on purpose today; close the DayBetter app. |
 | No IR hardware | DormBridge (above). |
 | Campus Wi-Fi blocks smart devices | Everything local is BLE; only the Hubspace bulbs need internet, through the phone. |
@@ -72,5 +72,5 @@ iPhone (Dorm Remote) ──┤                                             │
 ## Next steps, in order
 1. Install the current build; test strip colors and the bulb softhub (look for `bulb hub` lines in the log).
 2. Buy an M5Stack ATOM Lite (+ IR Unit), flash `dormbridge-merged.bin`, test the projector codes; learn any that don't work.
-3. App Intents (power, scene, color per light) → Siri, Shortcuts automations, Control Center controls.
+3. Shortcuts actions are in; add per-light actions and a Control Center control if needed.
 4. If the softhub can't join the account: get the bulbs on Wi-Fi, or swap them for `led-ble` bulbs.

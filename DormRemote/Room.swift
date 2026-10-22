@@ -139,6 +139,8 @@ enum Effect: Hashable {
 final class Room {
 
   static let all = "all"
+  /// One room for the app and its Shortcuts actions.
+  static let shared = Room(strip: StripController(), hubspace: HubspaceClient(), bridge: BridgeController(), lamps: BulbBank())
   static let stripID = "strip"
 
   let strip: StripController
