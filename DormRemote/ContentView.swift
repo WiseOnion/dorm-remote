@@ -1,3 +1,4 @@
+import ARKit
 import SwiftUI
 import UIKit
 
@@ -14,7 +15,7 @@ private enum Ink {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, log
+  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log
   var id: String {
     switch self {
     case .light(let id): "light-" + id
@@ -22,6 +23,8 @@ private enum Sheet: Identifiable {
     case .hubSetup: "hub"
     case .remote(let id): "remote-" + id
     case .addRemote: "addRemote"
+    case .scan: "scan"
+    case .map: "map"
     case .lampSetup: "lamps"
     case .add: "add"
     case .log: "log"
@@ -85,6 +88,8 @@ struct ContentView: View {
         case .hubSetup: HubSetup(hubspace: room.hubspace)
         case .remote(let id): RemoteSheet(room: room, id: id)
         case .addRemote: AddRemoteSheet(room: room)
+        case .scan: ScanSheet(room: room) { self.sheet = nil; DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.sheet = .map } }
+        case .map: RoomMapSheet(room: room)
         case .lampSetup: LampSetup(lamps: room.lamps)
         case .add: AddSheet { kind in
           room.restore(kind)
@@ -183,6 +188,8 @@ struct ContentView: View {
       }
       Spacer()
       Menu {
+        Button("Find my lights", systemImage: "viewfinder") { sheet = .scan }
+        Button("Room map", systemImage: "map") { sheet = .map }
         Button("Turn everything off", systemImage: "power") { room.setPower(Room.everything, false) }
         if room.hubspace.state == .ready {
           Button("Sign out of Hubspace", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { room.hubspace.signOut() }
@@ -1148,6 +1155,180 @@ private struct HubSetup: View {
     .buttonStyle(.plain)
     .disabled(disabled)
     .opacity(disabled ? 0.4 : 1)
+  }
+}
+
+/// "Find my lights": the lights blink one at a time while you turn slowly, and the app learns where each one is.
+private struct ScanSheet: View {
+  var room: Room
+  let openMap: () -> Void
+  @State private var scanner = LightScanner()
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        Text("Find my lights").font(.system(size: 28, weight: .bold, design: .rounded))
+        switch scanner.phase {
+        case .unsupported:
+          Text("This iPhone can't track motion for scanning. Place your lights on the room map instead.")
+            .foregroundStyle(Ink.dim)
+          wide("Open room map", action: openMap)
+        case .ready:
+          VStack(alignment: .leading, spacing: 10) {
+            step(1, "Dim the room if you can. Stand or sit where you usually are.")
+            step(2, "Tap Start and hold the phone up, like taking a panorama.")
+            step(3, "Turn slowly all the way around. The lights in \(room.currentRoom) blink one at a time; the ring fills as the app sees each one.")
+            step(4, "Tap Finish when the ring is mostly full. Your lights go back to how they were.")
+          }
+          .foregroundStyle(Ink.dim)
+          wide("Start") { scanner.start(room: room) }
+            .disabled(room.scanTargets().isEmpty)
+          if room.scanTargets().isEmpty {
+            Text("No connected lights in \(room.currentRoom).").font(.footnote).foregroundStyle(Ink.bad)
+          }
+        case .preparing, .scanning:
+          ZStack {
+            CameraView(session: scanner.session)
+              .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            Circle()
+              .trim(from: 0, to: scanner.coverage)
+              .stroke(Ink.text, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+              .rotationEffect(.degrees(-90))
+              .frame(width: 120, height: 120)
+              .animation(.easeOut, value: scanner.coverage)
+          }
+          .frame(height: 360)
+          Text(scanner.phase == .preparing
+               ? "Getting the lights ready…"
+               : "Keep turning slowly. \(Int(scanner.coverage * 100))% of the room seen.")
+            .foregroundStyle(Ink.dim)
+          wide("Finish") { scanner.finish() }
+            .disabled(scanner.coverage < 0.3)
+          Button("Cancel") {
+            scanner.cancel()
+            dismiss()
+          }
+          .frame(maxWidth: .infinity, minHeight: 44)
+        case .done:
+          ForEach(Array(scanner.names.keys.sorted()), id: \.self) { id in
+            HStack {
+              Text(scanner.names[id] ?? id)
+              Spacer()
+              if let r = scanner.results[id] {
+                Text(String(format: "Found · reacts in %.1f s", r.latency)).foregroundStyle(Ink.dim)
+              } else {
+                Text("Not seen").foregroundStyle(Ink.bad)
+              }
+            }
+            .font(.subheadline)
+            .frame(minHeight: 44)
+          }
+          Text(scanner.results.count == scanner.names.count
+               ? "All found. Scenes now sweep around the room and arrive together."
+               : "Place the ones not seen on the room map, or scan again in a darker room.")
+            .font(.footnote)
+            .foregroundStyle(Ink.dim)
+          wide("Check the room map", action: openMap)
+          Button("Scan again") { scanner.start(room: room) }
+            .frame(maxWidth: .infinity, minHeight: 44)
+        }
+      }
+      .padding(24)
+    }
+    .onDisappear { scanner.cancel() }
+  }
+
+  private func step(_ n: Int, _ text: String) -> some View {
+    HStack(alignment: .top, spacing: 10) {
+      Text("\(n)").font(.subheadline.weight(.bold)).frame(width: 22, height: 22).background(Circle().fill(Ink.raised))
+      Text(text).font(.subheadline)
+    }
+  }
+
+  private func wide(_ title: String, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Text(title)
+        .font(.body.weight(.semibold))
+        .frame(maxWidth: .infinity, minHeight: 52)
+        .foregroundStyle(.black)
+        .background(Capsule().fill(.white))
+    }
+    .buttonStyle(.plain)
+  }
+}
+
+/// Live camera for the scan, drawn from the scanner's own ARKit session.
+private struct CameraView: UIViewRepresentable {
+  let session: ARSession
+
+  func makeUIView(context: Context) -> ARSCNView {
+    let view = ARSCNView()
+    view.session = session
+    view.automaticallyUpdatesLighting = false
+    return view
+  }
+
+  func updateUIView(_ view: ARSCNView, context: Context) {}
+}
+
+/// Top-down room map, the fallback for lights the scan didn't see. You're in the middle; drag each light to where it is.
+private struct RoomMapSheet: View {
+  var room: Room
+
+  var body: some View {
+    let lights = room.inRoom.filter { $0.caps.contains(.color) }
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("\(room.currentRoom) map").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("You're the dot in the middle. Lights found by scanning are already placed; drag any light to fix it. Dashed ones aren't placed yet.")
+            .foregroundStyle(Ink.dim)
+        }
+        GeometryReader { geo in
+          let side = geo.size.width
+          ZStack {
+            RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.raised.opacity(0.5))
+            Circle().fill(Ink.text).frame(width: 14, height: 14)
+            Text("You").font(.caption2).foregroundStyle(Ink.dim).offset(y: 16)
+            ForEach(Array(lights.enumerated()), id: \.element.id) { index, light in
+              let placed = room.placements[light.id]
+              let fallback = Double(index) / Double(max(1, lights.count)) * 2 * .pi
+              let x = placed?.x ?? sin(fallback) * 0.9
+              let y = placed?.y ?? -cos(fallback) * 0.9
+              VStack(spacing: 4) {
+                Circle()
+                  .fill(light.glow.color)
+                  .frame(width: 34, height: 34)
+                  .overlay(Circle().strokeBorder(Ink.text, style: StrokeStyle(lineWidth: 2, dash: placed == nil ? [4] : [])))
+                Text(light.name).font(.caption2).lineLimit(1).fixedSize()
+              }
+              .position(x: (x + 1) / 2 * side, y: (y + 1) / 2 * side)
+              .gesture(DragGesture().onChanged { g in
+                room.setPlacement(light.id, x: g.location.x / side * 2 - 1, y: g.location.y / side * 2 - 1)
+              })
+              .accessibilityLabel(light.name)
+            }
+          }
+          .frame(width: side, height: side)
+        }
+        .aspectRatio(1, contentMode: .fit)
+        Button {
+          room.testSweep()
+        } label: {
+          Label("Test the sweep", systemImage: "wave.3.right")
+            .font(.body.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .foregroundStyle(.black)
+            .background(Capsule().fill(.white))
+        }
+        .buttonStyle(.plain)
+        Text("Each tap rolls a new color around the room, in order, timed so every light lands together.")
+          .font(.footnote)
+          .foregroundStyle(Ink.dim)
+      }
+      .padding(24)
+    }
   }
 }
 

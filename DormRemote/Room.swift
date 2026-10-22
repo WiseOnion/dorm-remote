@@ -410,6 +410,7 @@ final class Room {
 
   func setPower(_ id: String, _ on: Bool) {
     if !on { stopEffect() }
+    cancelSweep()
     mood = nil
     for light in targets(id) {
       switch light.kind {
@@ -425,17 +426,20 @@ final class Room {
   }
 
   func setBrightness(_ id: String, _ value: Int) {
+    cancelSweep()
     mood = nil
     for light in targets(id) { brightness(light, value) }
   }
 
   func setColor(_ id: String, _ color: RGB) {
+    cancelSweep()
     mood = nil
     if targets(id).contains(where: { $0.kind == .strip }) { stopEffect() }
     for light in targets(id) { paint(light, color) }
   }
 
   func setWhite(_ id: String, _ kelvin: Int) {
+    cancelSweep()
     mood = nil
     if targets(id).contains(where: { $0.kind == .strip }) { stopEffect() }
     for light in targets(id) { white(light, kelvin) }
@@ -467,16 +471,157 @@ final class Room {
 
   func apply(_ m: Mood) {
     stopEffect()
-    for light in roomReady where light.kind != .remote {
-      brightness(light, m.brightness)
+    sweep(roomReady.filter { $0.kind != .remote }) { [weak self] light in
+      guard let self else { return }
+      self.brightness(light, m.brightness)
       switch m.look {
-      case .color(let c): paint(light, c)
-      case .white(let k): white(light, k)
-      case .party: paint(light, RGB(r: 255, g: 0, b: 180))
+      case .color(let c): self.paint(light, c)
+      case .white(let k): self.white(light, k)
+      case .party: self.paint(light, RGB(r: 255, g: 0, b: 180))
       }
     }
     if case .party = m.look, roomReady.contains(where: { $0.kind == .strip }) { start(.pattern(10)) }
     mood = m.id
+  }
+
+  // MARK: Placement and sweeps
+
+  /// Where a light is, as seen from where you usually sit: x right, y toward you (-1…1), plus how long it
+  /// takes to react. Filled in by "Find my lights"; the room map is the fallback for anything not seen.
+  struct Placement: Codable {
+    var x: Double
+    var y: Double
+    var latency: Double
+    var found: Bool
+  }
+
+  private(set) var placements: [String: Placement] = {
+    guard let data = UserDefaults.standard.data(forKey: "placements") else { return [:] }
+    return (try? JSONDecoder().decode([String: Placement].self, from: data)) ?? [:]
+  }()
+  private var sweepTasks: [Task<Void, Never>] = []
+  private var sweepColor = 0
+  private var scanSaved: [LightItem] = []
+
+  /// Total time for a change to travel across the room.
+  static let sweepTime = 1.2
+
+  func setPlacement(_ id: String, x: Double, y: Double) {
+    let latency = placements[id]?.latency ?? defaultLatency(item(id))
+    placements[id] = Placement(x: max(-1, min(1, x)), y: max(-1, min(1, y)), latency: latency, found: false)
+    savePlacements()
+  }
+
+  func clearPlacement(_ id: String) {
+    placements[id] = nil
+    savePlacements()
+  }
+
+  private func defaultLatency(_ item: LightItem?) -> Double { item?.kind == .bulb ? 1.5 : 0.15 }
+
+  private func savePlacements() { UserDefaults.standard.set(try? JSONEncoder().encode(placements), forKey: "placements") }
+
+  private func cancelSweep() {
+    sweepTasks.forEach { $0.cancel() }
+    sweepTasks = []
+  }
+
+  /// Runs `action` on each light so the change rolls around the room in order, and lands together: slow lights
+  /// (cloud bulbs, measured during the scan) are sent early by their extra delay. Unplaced lights go first.
+  private func sweep(_ lights: [LightItem], _ action: @escaping @MainActor (LightItem) -> Void) {
+    cancelSweep()
+    let latency = { (l: LightItem) in self.placements[l.id]?.latency ?? self.defaultLatency(l) }
+    let slowest = lights.map(latency).max() ?? 0
+    let angles = lights.compactMap { l in placements[l.id].map { (l.id, atan2($0.y, $0.x)) } }
+    var progress: [String: Double] = [:]
+    if angles.count >= 2 {
+      // Start right after the widest empty stretch of the circle, so the sweep never jumps across the room.
+      let sorted = angles.sorted { $0.1 < $1.1 }
+      var gapEnd = 0
+      var widest = -1.0
+      for i in sorted.indices {
+        let next = sorted[(i + 1) % sorted.count].1
+        let gap = (next - sorted[i].1 + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)
+        if gap > widest { widest = gap; gapEnd = (i + 1) % sorted.count }
+      }
+      let start = sorted[gapEnd].1
+      let span = max(0.001, 2 * .pi - widest)
+      for (id, a) in angles {
+        progress[id] = min(1, ((a - start + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)) / span)
+      }
+    }
+    for light in lights {
+      let delay = (progress[light.id] ?? 0) * Self.sweepTime * (angles.count >= 2 ? 1 : 0) + (slowest - latency(light))
+      if delay < 0.02 {
+        action(light)
+      } else {
+        sweepTasks.append(Task { @MainActor in
+          try? await Task.sleep(for: .seconds(delay))
+          guard !Task.isCancelled else { return }
+          action(light)
+        })
+      }
+    }
+  }
+
+  /// Rolls the next color around the room so the order and timing can be checked.
+  func testSweep() {
+    let colors = [RGB(r: 255, g: 90, b: 30), RGB(r: 0, g: 140, b: 255), RGB(r: 140, g: 0, b: 255), RGB(r: 0, g: 220, b: 120)]
+    let c = colors[sweepColor % colors.count]
+    sweepColor += 1
+    stopEffect()
+    mood = nil
+    sweep(roomReady.filter { $0.caps.contains(.color) }) { [weak self] in self?.paint($0, c) }
+  }
+
+  // MARK: Scanning (driven by LightScanner)
+
+  func scanTargets() -> [LightItem] { roomReady.filter { $0.caps.contains(.power) } }
+
+  /// Remembers each light's look, then sets them all to bright white, the easiest change for the camera to see.
+  func scanPrepare() {
+    stopEffect()
+    cancelSweep()
+    scanSaved = scanTargets()
+    for light in scanSaved {
+      brightness(light, 100)
+      white(light, 5000)
+    }
+  }
+
+  /// Power only, so the scan doesn't overwrite the saved look.
+  func scanPower(_ id: String, _ on: Bool) {
+    guard let light = item(id) else { return }
+    switch light.kind {
+    case .strip: strip.setPower(on)
+    case .bulb: hub(light).map { hubspace.setPower($0, on) }
+    case .bleBulb: lamp(light).map { lamps.setPower($0, on) }
+    case .remote: break
+    }
+  }
+
+  func scanFinished(_ found: [String: LightScanner.Result]) {
+    for (id, r) in found {
+      // yaw 0 = the way the phone faced at the start, clockwise; that direction is "up" on the map.
+      placements[id] = Placement(x: sin(r.yaw) * 0.8, y: -cos(r.yaw) * 0.8, latency: r.latency, found: true)
+    }
+    savePlacements()
+    scanRestore()
+  }
+
+  /// Puts every scanned light back how it was.
+  func scanRestore() {
+    for light in scanSaved {
+      if light.on {
+        brightness(light, light.brightness)
+        if let k = light.kelvin { white(light, k) } else { paint(light, light.color) }
+      } else {
+        scanPower(light.id, false)
+        if light.kind == .strip { stripLook.on = false }
+      }
+    }
+    scanSaved = []
+    saveStrip()
   }
 
   private func targets(_ id: String) -> [LightItem] {
