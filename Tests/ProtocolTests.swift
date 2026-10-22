@@ -31,6 +31,17 @@ final class DaybetterTests: XCTestCase {
     XCTAssertEqual(hex(Daybetter.frame(Daybetter.mode, [Daybetter.micMode, 3])), "A0 12 05 A0 03 89 61")
   }
 
+  func testStatusReply() throws {
+    // power on, solid mode, brightness 50, color reported pre-scaled by brightness.
+    let bytes: [UInt8] = [0xA1, 0x10, 0x11, 0x01, 0x01, 0x00, 50, 30, 128, 127, 0, 64, 0xFF, 0, 0, 0, 0, 0, 0]
+    let status = try XCTUnwrap(StripStatus(bytes))
+    XCTAssertTrue(status.on)
+    XCTAssertEqual(status.mode, 1)
+    XCTAssertEqual(status.brightness, 50)
+    XCTAssertEqual([status.r, status.g, status.b], [254, 0, 128])
+    XCTAssertNil(StripStatus([0xA1, 0x13, 0x04, 0x01, 0x11, 0x1D]))
+  }
+
   func testStripNames() {
     XCTAssertTrue(Daybetter.looksLikeStrip("P031_3712"))
     XCTAssertTrue(Daybetter.looksLikeStrip("Smart Light"))

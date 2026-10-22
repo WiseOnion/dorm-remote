@@ -543,6 +543,14 @@ private struct LightSheet: View {
           }
         }
       }
+      if case .stripMic = room.effect {
+        VStack(alignment: .leading, spacing: 12) {
+          heading("Mic sensitivity", "mic")
+          PillSlider(value: Binding(get: { Double(room.sensitivity) / 255 }, set: { room.setSensitivity(Int(($0 * 255).rounded())) }),
+                     fill: AnyShapeStyle(Ink.text), label: "Mic sensitivity")
+            .frame(height: 40)
+        }
+      }
       effectCard("Use phone mic", colors: [.white, Ink.dim], active: room.effect == .phoneMic) { room.start(.phoneMic) }
       if room.effect == .phoneMic {
         Capsule()

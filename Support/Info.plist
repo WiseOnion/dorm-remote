@@ -26,6 +26,10 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Music mode listens to the room so your lights pulse with the beat. Nothing is recorded.</string>
 
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>bluetooth-central</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

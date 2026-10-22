@@ -96,27 +96,30 @@ enum Effect: Hashable {
                         RGB(r: 0, g: 200, b: 255), RGB(r: 0, g: 0, b: 255), RGB(r: 160, g: 0, b: 255)]
   static let three = [RGB(r: 255, g: 0, b: 0), RGB(r: 0, g: 255, b: 0), RGB(r: 0, g: 0, b: 255)]
 
-  // Mode ids from DoudGeorges/daybetter-leds PROTOCOL.md (QC family): 9–10 jump, 11–22 fade, 23–30 strobe.
-  // ponytail: the protocol doc gives the single-color modes as a range without naming each color;
-  // the order below is the usual one for these controllers. Swap names if the strip shows otherwise.
+  // Mode ids from the PsychedelicPalimpsest DayBetter gateway (checked live on a QC strip), in IR-remote order:
+  // 9–10 jump, 11–12 fade, 13–19 blink one color, 20–22 two-color fade, 23 flash all, 24–30 flash one color, 31–32 strobe.
   static let singles: [(String, RGB)] = [
     ("Red", RGB(r: 255, g: 0, b: 0)), ("Green", RGB(r: 0, g: 255, b: 0)), ("Blue", RGB(r: 0, g: 0, b: 255)),
-    ("Yellow", RGB(r: 255, g: 255, b: 0)), ("Cyan", RGB(r: 0, g: 255, b: 255)), ("Purple", RGB(r: 160, g: 0, b: 255)),
+    ("Yellow", RGB(r: 255, g: 255, b: 0)), ("Teal", RGB(r: 0, g: 255, b: 255)), ("Purple", RGB(r: 160, g: 0, b: 255)),
     ("White", RGB(r: 255, g: 255, b: 255)),
   ]
   static let patternGroups: [(String, [Pattern])] = {
     let off = RGB(r: 0, g: 0, b: 0)
     let jump: [Pattern] = [Pattern(name: "Jump 3", id: 9, colors: three), Pattern(name: "Jump 7", id: 10, colors: rainbow)]
-    var fade: [Pattern] = [Pattern(name: "Fade 3", id: 11, colors: three), Pattern(name: "Fade 7", id: 12, colors: rainbow)]
-    var strobe: [Pattern] = [Pattern(name: "Strobe 7", id: 23, colors: rainbow)]
+    let fade: [Pattern] = [
+      Pattern(name: "Fast fade", id: 11, colors: rainbow), Pattern(name: "Slow fade", id: 12, colors: rainbow),
+      Pattern(name: "Red & green", id: 20, colors: [three[0], three[1]]),
+      Pattern(name: "Red & blue", id: 21, colors: [three[0], three[2]]),
+      Pattern(name: "Green & blue", id: 22, colors: [three[1], three[2]]),
+    ]
+    var blink: [Pattern] = []
+    var flash: [Pattern] = [Pattern(name: "Flash all", id: 23, colors: rainbow)]
     for (i, single) in singles.enumerated() {
-      fade.append(Pattern(name: single.0 + " fade", id: UInt8(13 + i), colors: [single.1, off]))
-      strobe.append(Pattern(name: single.0 + " strobe", id: UInt8(24 + i), colors: [single.1, off]))
+      blink.append(Pattern(name: single.0 + " blink", id: UInt8(13 + i), colors: [single.1, off]))
+      flash.append(Pattern(name: single.0 + " flash", id: UInt8(24 + i), colors: [single.1, off]))
     }
-    fade.append(Pattern(name: "Red & green", id: 20, colors: [three[0], three[1]]))
-    fade.append(Pattern(name: "Red & blue", id: 21, colors: [three[0], three[2]]))
-    fade.append(Pattern(name: "Green & blue", id: 22, colors: [three[1], three[2]]))
-    return [("Jump", jump), ("Fade", fade), ("Strobe", strobe)]
+    let strobe: [Pattern] = [Pattern(name: "Strobe", id: 31, colors: [.white, off]), Pattern(name: "Strobe 2", id: 32, colors: rainbow)]
+    return [("Jump", jump), ("Fade", fade), ("Blink", blink), ("Flash", flash), ("Strobe", strobe)]
   }()
   static let patterns = patternGroups.flatMap(\.1)
 
@@ -156,6 +159,8 @@ final class Room {
   private var average: Double = 0
   /// Effect speed, 1–100.
   private(set) var speed = UserDefaults.standard.object(forKey: "speed") as? Int ?? 50
+  /// Strip mic sensitivity, 0–255.
+  private(set) var sensitivity = UserDefaults.standard.object(forKey: "sensitivity") as? Int ?? 128
 
   init(strip: StripController, hubspace: HubspaceClient) {
     self.strip = strip
@@ -169,6 +174,29 @@ final class Room {
       stripLook.color = saved.color
       stripLook.kelvin = saved.kelvin
     }
+    strip.onStatus = { [weak self] status in
+      MainActor.assumeIsolated { self?.apply(status) }
+    }
+  }
+
+  /// The strip's own report wins over what we remember, so IR remote changes show up here.
+  private func apply(_ status: StripStatus) {
+    stripLook.on = status.on
+    stripLook.brightness = status.brightness
+    switch status.mode {
+    case 0x01:
+      stripLook.color = RGB(r: status.r, g: status.g, b: status.b)
+      stripLook.kelvin = nil
+      if case .pattern = effect { effect = nil }
+      if case .stripMic = effect { effect = nil }
+    case Daybetter.micMode:
+      if effect != .phoneMic { effect = .stripMic(status.subMode) }
+    case let mode where Effect.patterns.contains(where: { $0.id == mode }):
+      effect = .pattern(mode)
+    default:
+      break
+    }
+    saveStrip()
   }
 
   // MARK: Lights
@@ -362,6 +390,7 @@ final class Room {
       strip.setSpeed(speed)
     case .stripMic(let style):
       strip.setMicMusic(style: style)
+      strip.setSensitivity(sensitivity)
     case .phoneMic:
       Task {
         guard await AVAudioApplication.requestRecordPermission() else {
@@ -376,6 +405,12 @@ final class Room {
         }
       }
     }
+  }
+
+  func setSensitivity(_ value: Int) {
+    sensitivity = value
+    UserDefaults.standard.set(value, forKey: "sensitivity")
+    strip.setSensitivity(value)
   }
 
   func setSpeed(_ value: Int) {

@@ -10,7 +10,9 @@ enum Daybetter {
   static let mode: UInt8 = 0x12
   static let brightness: UInt8 = 0x13
   static let color: UInt8 = 0x15
+  static let status: UInt8 = 0x10
   static let speed: UInt8 = 0x16
+  static let sensitivity: UInt8 = 0x17
   static let rhythm: UInt8 = 0x21
   /// Mode id for the controller's own microphone; the sub-mode picks the style (0 Classic … 3 Disco).
   static let micMode: UInt8 = 160
@@ -51,6 +53,28 @@ enum Daybetter {
   }
 }
 
+/// What the strip reports about itself (also after IR remote presses).
+struct StripStatus: Equatable {
+  var on: Bool
+  var mode: UInt8
+  var subMode: UInt8
+  var brightness: Int
+  /// The color as commanded, undoing the strip's brightness scaling.
+  var r: Int, g: Int, b: Int
+
+  /// Status reply: A1 10 <len> power mode subMode brightness speed sensitivity R G B W …
+  /// The strip reports R,G,B already scaled by brightness (PsychedelicPalimpsest gateway, verified on a P065).
+  init?(_ bytes: [UInt8]) {
+    guard bytes.count >= 14, bytes[0] == 0xA1, bytes[1] == Daybetter.status else { return nil }
+    on = bytes[3] != 0
+    mode = bytes[4]
+    subMode = bytes[5]
+    brightness = max(1, min(100, Int(bytes[6])))
+    let unscale = { (v: UInt8) in min(255, Int((Double(v) * 100 / Double(max(1, Int(bytes[6])))).rounded())) }
+    r = unscale(bytes[9]); g = unscale(bytes[10]); b = unscale(bytes[11])
+  }
+}
+
 struct FoundDevice: Identifiable {
   let id: UUID
   let name: String
@@ -75,12 +99,9 @@ final class StripController: NSObject {
   // ponytail: one queued command per command type, newest wins, so dragging a slider never floods
   // the strip and a tap on "On" isn't dropped by a color change right after it.
   private var pending: [Data] = []
-  // Sources disagree on 3-byte RGB vs 4-byte RGBW color. Start with RGB; switch if the strip rejects it.
-  private var useRGBW = false
-  private var lastColor: (UInt8, UInt8, UInt8) = (255, 255, 255)
-  /// A built-in effect is running; colors need static mode back first.
-  private var effectMode = false
   private var rhythmOn = false
+  /// Called on the main queue whenever the strip reports its state.
+  var onStatus: ((StripStatus) -> Void)?
   private var handshakeTimer: Timer?
   private var connectTimer: Timer?
   /// The user tapped Disconnect; don't reconnect on our own.
@@ -127,42 +148,34 @@ final class StripController: NSObject {
   func setPower(_ on: Bool) { send(Daybetter.frame(Daybetter.power, [on ? 1 : 0])) }
   func setBrightness(_ percent: Int) { send(Daybetter.frame(Daybetter.brightness, [UInt8(max(1, min(100, percent)))])) }
 
+  /// Same sequence as the DayBetter app: solid-color mode, then R G B with the 4th byte FF.
+  /// A 3-byte color makes some controllers read the checksum as the 4th byte, so only some colors come out right.
   func setColor(r: UInt8, g: UInt8, b: UInt8) {
-    lastColor = (r, g, b)
-    if effectMode {
-      stopRhythm()
-      send(Daybetter.frame(Daybetter.mode, [0x01, 0x00]))
-      effectMode = false
-    }
-    send(colorFrame())
+    stopRhythm()
+    send(Daybetter.frame(Daybetter.mode, [0x01, 0x00]))
+    send(Daybetter.frame(Daybetter.color, [r, g, b, 0xFF]))
   }
 
   /// Built-in patterns run on the strip itself, so they keep going after the app closes.
   func setPattern(_ id: UInt8) {
     stopRhythm()
     send(Daybetter.frame(Daybetter.mode, [id, 0xFF]))
-    effectMode = true
   }
 
   func setSpeed(_ percent: Int) { send(Daybetter.frame(Daybetter.speed, [UInt8(max(1, min(100, percent)))])) }
+  func setSensitivity(_ value: Int) { send(Daybetter.frame(Daybetter.sensitivity, [UInt8(max(0, min(255, value)))])) }
 
   /// Music from the microphone in the strip's controller.
   func setMicMusic(style: UInt8) {
     send(Daybetter.frame(Daybetter.mode, [Daybetter.micMode, style]))
     send(Daybetter.frame(Daybetter.rhythm, [0x01]))
     rhythmOn = true
-    effectMode = true
   }
 
   private func stopRhythm() {
     guard rhythmOn else { return }
     send(Daybetter.frame(Daybetter.rhythm, [0x00]))
     rhythmOn = false
-  }
-
-  private func colorFrame() -> Data {
-    let (r, g, b) = lastColor
-    return Daybetter.frame(Daybetter.color, useRGBW ? [r, g, b, 0] : [r, g, b])
   }
 
   private func attach(_ p: CBPeripheral) {
@@ -223,6 +236,8 @@ final class StripController: NSObject {
     state = .connected
     connectedName = peripheral?.name
     if let peripheral { UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.savedKey) }
+    // Ask for the current state so the app matches whatever the remote or DayBetter app set.
+    send(Daybetter.frame(Daybetter.status, [0x01]))
   }
 
   private func startHandshake() {
@@ -256,11 +271,8 @@ final class StripController: NSObject {
       } else {
         fail("The strip rejected the unlock. Open the log and share it.")
       }
-    case Daybetter.color where bytes[3] != 0x01 && !useRGBW:
-      note("3-byte color rejected, switching to RGBW")
-      useRGBW = true
-      send(Daybetter.frame(Daybetter.mode, [0x01, 0x00]))
-      send(colorFrame())
+    case Daybetter.status:
+      if let status = StripStatus(bytes) { onStatus?(status) }
     default:
       break
     }
@@ -326,7 +338,6 @@ extension StripController: CBCentralManagerDelegate {
     connectedName = nil
     inFlight = false
     pending = []
-    effectMode = false
     rhythmOn = false
     note("disconnected \(error?.localizedDescription ?? "")")
     // Keep an error on screen, and don't fight a scan the user started.
