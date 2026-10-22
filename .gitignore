@@ -10,3 +10,5 @@ Payload/
 .DS_Store
 
 Vendor/AferoSofthub.xcframework/
+
+firmware/.pio/
