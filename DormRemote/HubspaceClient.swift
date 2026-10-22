@@ -241,7 +241,7 @@ final class HubspaceClient: NSObject {
   /// Re-reads the bulbs so the app shows what they're really doing, including changes made in the Hubspace app
   /// or by the bulb itself. Skipped while a command is waiting, so it can't undo a change you just made.
   func refresh() async {
-    guard state == .ready, let accountID, pendingSends.values.allSatisfy(\.isCancelled) || pendingSends.isEmpty else { return }
+    guard state == .ready, let accountID, pendingSends.isEmpty else { return }
     guard let list = try? await api("GET", K.dataHost + "/v1/accounts/\(accountID)/metadevices?expansions=state,capabilities,semantics") as? [[String: Any]],
           pendingSends.isEmpty else { return }
     lights = list.compactMap(Self.parseLight)
