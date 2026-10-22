@@ -83,10 +83,10 @@ struct ContentView: View {
           // Open the new device's setup once this sheet is gone.
           DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             switch kind {
-            case .strip: sheet = .stripSetup
-            case .hubspace: sheet = room.hubspace.state == .ready ? nil : .hubSetup
-            case .bluetooth: sheet = .lampSetup
-            case .projector: sheet = .projector
+            case .strip: self.sheet = .stripSetup
+            case .hubspace: self.sheet = room.hubspace.state == .ready ? nil : .hubSetup
+            case .bluetooth: self.sheet = .lampSetup
+            case .projector: self.sheet = .projector
             }
           }
         }
