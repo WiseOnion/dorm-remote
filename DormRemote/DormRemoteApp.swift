@@ -2,12 +2,12 @@ import SwiftUI
 
 @main
 struct DormRemoteApp: App {
-  @State private var strip = StripController()
-  @State private var hubspace = HubspaceClient()
+  @State private var room = Room(strip: StripController(), hubspace: HubspaceClient())
 
   var body: some Scene {
     WindowGroup {
-      ContentView(strip: strip, hubspace: hubspace)
+      ContentView(room: room)
+        .preferredColorScheme(.dark)
     }
   }
 }

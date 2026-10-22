@@ -74,6 +74,9 @@ final class StripController: NSObject {
 
   private static let savedKey = "stripPeripheralID"
 
+  /// A strip was picked before, so the app should find it on its own.
+  var hasSaved: Bool { UserDefaults.standard.string(forKey: Self.savedKey) != nil }
+
   override init() {
     super.init()
     central = CBCentralManager(delegate: self, queue: .main)
@@ -249,6 +252,12 @@ extension StripController: CBCentralManagerDelegate {
   func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,
                       advertisementData: [String: Any], rssi RSSI: NSNumber) {
     let name = peripheral.name ?? advertisementData[CBAdvertisementDataLocalNameKey] as? String
+    // The saved strip came back into range or finished booting.
+    if state == .scanning, peripheral.identifier.uuidString == UserDefaults.standard.string(forKey: Self.savedKey) {
+      central.stopScan()
+      attach(peripheral)
+      return
+    }
     guard let name, !name.isEmpty else { return }
     if let i = devices.firstIndex(where: { $0.id == peripheral.identifier }) {
       devices[i].rssi = RSSI.intValue

@@ -103,6 +103,17 @@ final class HubspaceTests: XCTestCase {
     XCTAssertNil(HubspaceClient.parseLight(child))
   }
 
+  func testParseWhiteMode() throws {
+    let dev = try device("""
+      {"id": "meta-2", "typeId": "metadevice.device", "description": {"device": {"deviceClass": "light"}},
+       "state": {"values": [
+         {"functionClass": "color-mode", "functionInstance": null, "value": "white"},
+         {"functionClass": "color-temperature", "functionInstance": null, "value": 3000}
+       ]}}
+      """)
+    XCTAssertEqual(try XCTUnwrap(HubspaceClient.parseLight(dev)).kelvin, 3000)
+  }
+
   func testStateBody() throws {
     let light = HubLight(id: "meta-1", name: "L", on: true, brightness: 50, r: 0, g: 0, b: 0,
                          instances: ["power": nil, "color-mode": "primary"])
@@ -110,5 +121,13 @@ final class HubspaceTests: XCTestCase {
     let data = try JSONSerialization.data(withJSONObject: body, options: .sortedKeys)
     XCTAssertEqual(String(decoding: data, as: UTF8.self),
                    #"{"metadeviceId":"meta-1","values":[{"functionClass":"power","functionInstance":null,"lastUpdateTime":123,"value":"on"},{"functionClass":"color-mode","functionInstance":"primary","lastUpdateTime":123,"value":"color"}]}"#)
+  }
+}
+
+final class LookTests: XCTestCase {
+  func testKelvinToRGB() {
+    XCTAssertEqual(RGB.kelvin(2700), RGB(r: 255, g: 167, b: 87))
+    XCTAssertEqual(RGB.kelvin(2200), RGB(r: 255, g: 146, b: 39))
+    XCTAssertEqual(RGB.kelvin(6500), RGB(r: 255, g: 254, b: 250))
   }
 }

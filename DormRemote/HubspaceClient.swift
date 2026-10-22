@@ -13,6 +13,8 @@ struct HubLight: Identifiable {
   var r: Int, g: Int, b: Int
   /// functionInstance per functionClass, as the device reports it (often null).
   var instances: [String: String?]
+  /// Set while the bulb is in white mode.
+  var kelvin: Int? = nil
 }
 
 @MainActor
@@ -240,8 +242,14 @@ final class HubspaceClient: NSObject {
   }
 
   func setColor(_ light: HubLight, r: Int, g: Int, b: Int) {
-    update(light.id) { $0.r = r; $0.g = g; $0.b = b; $0.on = true }
+    update(light.id) { $0.r = r; $0.g = g; $0.b = b; $0.on = true; $0.kelvin = nil }
     send(light, key: "color", [("power", "on"), ("color-mode", "color"), ("color-rgb", ["color-rgb": ["r": r, "g": g, "b": b]])])
+  }
+
+  /// Tunable white, 2200–6500 K on the EcoSmart RGBW bulbs. Shares the color slot so the last pick wins.
+  func setWhite(_ light: HubLight, kelvin: Int) {
+    update(light.id) { $0.kelvin = kelvin; $0.on = true }
+    send(light, key: "color", [("power", "on"), ("color-mode", "white"), ("color-temperature", kelvin)])
   }
 
   private func update(_ id: String, _ change: (inout HubLight) -> Void) {
@@ -303,6 +311,8 @@ final class HubspaceClient: NSObject {
           (description["device"] as? [String: Any])?["deviceClass"] as? String == "light"
     else { return nil }
     var light = HubLight(id: id, name: dev["friendlyName"] as? String ?? "Light", on: false, brightness: 100, r: 255, g: 255, b: 255, instances: [:])
+    var mode: String?
+    var temperature: Int?
     for s in (dev["state"] as? [String: Any])?["values"] as? [[String: Any]] ?? [] {
       guard let cls = s["functionClass"] as? String else { continue }
       if light.instances[cls] == nil { light.instances.updateValue(s["functionInstance"] as? String, forKey: cls) }
@@ -314,9 +324,12 @@ final class HubspaceClient: NSObject {
         light.r = (rgb["r"] as? NSNumber)?.intValue ?? 255
         light.g = (rgb["g"] as? NSNumber)?.intValue ?? 255
         light.b = (rgb["b"] as? NSNumber)?.intValue ?? 255
+      case "color-mode": mode = s["value"] as? String
+      case "color-temperature": temperature = (s["value"] as? NSNumber)?.intValue
       default: break
       }
     }
+    if mode == "white" { light.kelvin = temperature ?? 2700 }
     return light
   }
 

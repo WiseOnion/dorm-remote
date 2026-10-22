@@ -23,6 +23,8 @@
 
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Needed to control your LED strip over Bluetooth.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Music mode listens to the room so your lights pulse with the beat. Nothing is recorded.</string>
 
 	<key>UIApplicationSceneManifest</key>
 	<dict>
