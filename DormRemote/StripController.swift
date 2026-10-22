@@ -148,12 +148,12 @@ final class StripController: NSObject {
   func setPower(_ on: Bool) { send(Daybetter.frame(Daybetter.power, [on ? 1 : 0])) }
   func setBrightness(_ percent: Int) { send(Daybetter.frame(Daybetter.brightness, [UInt8(max(1, min(100, percent)))])) }
 
-  /// Same sequence as the DayBetter app: solid-color mode, then R G B with the 4th byte FF.
-  /// A 3-byte color makes some controllers read the checksum as the 4th byte, so only some colors come out right.
+  /// Solid-color mode, then R G B W. W is the strip's white channel: FF washes every color out to white
+  /// (seen on a P031), and a 3-byte color makes the controller read a checksum byte as W. So W is always 0.
   func setColor(r: UInt8, g: UInt8, b: UInt8) {
     stopRhythm()
     send(Daybetter.frame(Daybetter.mode, [0x01, 0x00]))
-    send(Daybetter.frame(Daybetter.color, [r, g, b, 0xFF]))
+    send(Daybetter.frame(Daybetter.color, [r, g, b, 0x00]))
   }
 
   /// Built-in patterns run on the strip itself, so they keep going after the app closes.
