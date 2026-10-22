@@ -19,6 +19,7 @@ iPhone (Dorm Remote) ──┤                                             │
 | DayBetter LED strip (P031, QC family) | Phone → strip over BLE, CCHIP unlock, `A0` frames | Yes | None |
 | Xtreme Lit astronaut projector | Phone → DormBridge over BLE → IR LED | Yes | M5Stack ATOM Lite (~$8); optional IR Unit U002 (~$4) to learn codes |
 | EcoSmart Hubspace bulbs | Phone runs Afero's Softhub → Hubspace cloud → back through the phone → bulb over BLE | No (needs the phone's internet) | None |
+| Replacement Triones / ELK-BLEDOM bulbs | Phone → bulb over BLE | Yes | Bulbs replace the Hubspace ones (not an extra device) |
 
 ## Why each choice
 
@@ -52,16 +53,17 @@ iPhone (Dorm Remote) ──┤                                             │
   1. **Softhub in the app** (built, needs testing). Zero extra hardware.
   2. **Put the bulbs on Wi-Fi**: register the bulb's MAC (`14:08:08:13:c9:70`) on the campus device network if there is one,
      or use a pocket travel router. Still cloud, but works without the phone open.
-  3. **Fully local**: swap the Hubspace bulbs for BLE bulbs with a documented protocol, controlled the same way as the strip.
-     Generic `Triones:` / `LEDBLE-` / `QHM-` bulbs are covered by the open `led-ble` library (Bluetooth-Devices). DayBetter's
-     own bulbs are Wi-Fi, so check a bulb's BLE name before buying.
+  3. **Fully local (built)**: swap the Hubspace bulbs for Bluetooth bulbs with a published protocol. The app already drives
+     **Triones** bulbs (sold for the "Happy Lighting" app; spec: madhead/saberlight) and **ELK-BLEDOM** bulbs (sold for the
+     "Lotus Lamp" app; spec: dave-code-ruiz/elkbledom), with power, color, white, and brightness, all over BLE from the phone.
+     Tap "Add a Bluetooth bulb" on the home screen. Check the listing names one of those apps before buying.
 
 ## iOS limits and the workarounds
 
 | Limit | Workaround |
 |---|---|
 | Free Apple ID apps expire after 7 days | Install **SideStore** with iloader once; it refreshes on the phone over LocalDevVPN, no PC. Or a $99/yr developer account (1-year signing). |
-| Apple's sign-in block on sideloading tools (Oct 2026, error -80045/-80046) | iloader 2.3.10 with the **Jkcoxson** anisette server. Sideloadly 0.71 still fails. |
+| Apple's sign-in block on sideloading tools (Oct 2026, error -80045/-80046) | iloader 2.3.10. Pick a working anisette server (StikStore or Jkcoxson) **before** signing in: iloader fixes the server at login (`account.rs`), so changing it later needs Sign Out → Sign In. Sideloadly 0.71 still fails. |
 | No timers while the app is closed | Built-in effects run on the lights themselves. For schedules, add App Intents and use **Shortcuts → Automation → Time of Day → Run Immediately** (next step). |
 | BLE is one connection per strip | The app releases nothing on purpose today; close the DayBetter app. |
 | No IR hardware | DormBridge (above). |
