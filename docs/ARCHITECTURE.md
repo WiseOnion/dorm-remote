@@ -11,14 +11,14 @@ Goal: one iPhone app that runs every light in the room, works without campus Wi-
 iPhone (Dorm Remote) ──┤                                             │
                        ├──► DayBetter strip P031 (direct, local)     │
                        ├──► DormBridge (M5Stack ATOM Lite) ──IR──► astronaut projector
-                       └──► Hubspace bulbs (Afero Softhub inside the app) ──► Hubspace cloud ──┘
+                       └──► Hubspace cloud ──► Hubspace bulbs on Aggie_Guest Wi-Fi
 ```
 
 | Light | Path | Local? | Extra hardware |
 |---|---|---|---|
 | DayBetter LED strip (P031, QC family) | Phone → strip over BLE, CCHIP unlock, `A0` frames | Yes | None |
 | Xtreme Lit astronaut projector | Phone → DormBridge over BLE → IR LED | Yes | M5Stack ATOM Lite (~$8); optional IR Unit U002 (~$4) to learn codes |
-| EcoSmart Hubspace bulbs | Phone runs Afero's Softhub → Hubspace cloud → back through the phone → bulb over BLE | No (needs the phone's internet) | None |
+| EcoSmart Hubspace bulbs | Bulb on Wi-Fi (Aggie_Guest) → Hubspace cloud ← phone | No | None |
 | Replacement Triones / ELK-BLEDOM bulbs | Phone → bulb over BLE | Yes | Bulbs replace the Hubspace ones (not an extra device) |
 
 ## Why each choice
@@ -42,21 +42,20 @@ iPhone (Dorm Remote) ──┤                                             │
   decodes the real remote's signal with IRremoteESP8266 and the app saves it per button.
 - Flash from the browser (esptool-js, Chrome/Edge); CI produces one merged `.bin`.
 
-### Hubspace bulbs: the bulb is the hard limit
-- The bulbs never finished Wi-Fi setup (dorm Wi-Fi is usually WPA2-Enterprise, which these bulbs can't join).
-- Without Wi-Fi they only reach Hubspace through a Bluetooth hub. The Hubspace app is that hub; Dorm Remote now embeds the same
-  component, Afero's published **AferoSofthub** framework (Afero Permissive Binary License, redistribution allowed).
-  Commands still go phone → Hubspace cloud → phone → bulb, so this needs internet (cellular is fine) and works only while
-  the app is open (Afero asks apps to stop the softhub in the background).
-- Afero encrypts its BLE link and no one has published a local protocol (Home Assistant and Hubitat communities, 2023–2026),
-  so **a fully local Hubspace path does not exist today**. Ranked fallbacks:
-  1. **Softhub in the app** (built, needs testing). Zero extra hardware.
-  2. **Put the bulbs on Wi-Fi**: register the bulb's MAC (`14:08:08:13:c9:70`) on the campus device network if there is one,
-     or use a pocket travel router. Still cloud, but works without the phone open.
-  3. **Fully local (built)**: swap the Hubspace bulbs for Bluetooth bulbs with a published protocol. The app already drives
-     **Triones** bulbs (sold for the "Happy Lighting" app; spec: madhead/saberlight) and **ELK-BLEDOM** bulbs (sold for the
-     "Lotus Lamp" app; spec: dave-code-ruiz/elkbledom), with power, color, white, and brightness, all over BLE from the phone.
-     Tap "Add a Bluetooth bulb" on the home screen. Check the listing names one of those apps before buying.
+### Hubspace bulbs: they need Wi-Fi
+- Tested: the cloud API works (login, list, commands), but every command returns **424** because the bulbs never joined Wi-Fi.
+- Local Bluetooth control is not possible: Afero uses end-to-end ECDH + AES-GCM with keys that never leave the bulb
+  (Afero security white paper; jdeath/Hubspace-Homeassistant #258, 2026: "BT control is out").
+- Running Afero's public Softhub inside this app was tried and removed: Hubspace's cloud (api2.afero.net) only accepts
+  hubs with Hubspace's private authenticator certificate; a `prod` softhub's join returns 400 (seen in this app's log).
+- Ranked fixes:
+  1. **NC A&T Aggie_Guest**: register the bulb's Wi-Fi MAC (`14:08:08:13:c9:70`) at https://ncatnac2.ncat.edu/self_registration
+     (sign in from AggiePride), wait for "Approved", then run Wi-Fi setup in the Hubspace app and pick Aggie_Guest. NC A&T's KB
+     lists bulbs/plugs as Aggie_Guest devices. Risk: Hubspace needs 2.4 GHz; if the network doesn't show, ask the IT desk
+     (336-334-7195) or file "Student Device and Gaming Registration". After that, Dorm Remote controls the bulbs, no app changes.
+  2. **A spare phone's Personal Hotspot** with "Maximize Compatibility" (2.4 GHz) as the bulb's Wi-Fi.
+  3. **Fully local**: replace with Triones (Happy Lighting) or ELK-BLEDOM (Lotus Lamp) bulbs, about $8–11 each; Dorm Remote
+     already drives them over BLE ("Add" → Bluetooth bulb). Avoid newer Govee bulbs (encrypted BLE).
 
 ## iOS limits and the workarounds
 

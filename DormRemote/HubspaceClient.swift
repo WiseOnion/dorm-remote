@@ -37,8 +37,6 @@ final class HubspaceClient: NSObject {
   /// Last failed command, shown under the lights. Commands failing never sign you out.
   var commandError: String?
   var log: [String] = []
-  /// Relays commands over Bluetooth to bulbs that aren't on Wi-Fi.
-  let hub = BulbHub()
 
   enum K {
     static let authHost = "https://accounts.hubspaceconnect.com/auth/realms/thd"
@@ -63,29 +61,7 @@ final class HubspaceClient: NSObject {
 
   override init() {
     super.init()
-    hub.log = { [weak self] in self?.note($0) }
     if refreshToken != nil { Task { await load() } }
-  }
-
-  /// Start the Bluetooth hub once signed in; the app stops it in the background.
-  func startHub() {
-    guard let accountID else { return }
-    hub.start(accountID: accountID) { [weak self] associationId in
-      await self?.associateHub(associationId) ?? false
-    }
-  }
-
-  /// The softhub joins the account as a device, like the Hubspace app's hub does.
-  private func associateHub(_ associationId: String) async -> Bool {
-    guard let accountID else { return false }
-    do {
-      _ = try await api("POST", K.apiHost + "/v1/accounts/\(accountID)/devices", json: ["associationId": associationId])
-      note("bulb hub joined the account")
-      return true
-    } catch {
-      note("bulb hub couldn't join: \(error.localizedDescription)")
-      return false
-    }
   }
 
   // MARK: Login
@@ -166,7 +142,6 @@ final class HubspaceClient: NSObject {
   }
 
   func signOut() {
-    hub.stop()
     Keychain.delete(K.refreshKey)
     refreshToken = nil
     idToken = nil
@@ -254,7 +229,6 @@ final class HubspaceClient: NSObject {
       note("found \(lights.count) light(s) in \(list.count) device record(s)")
       commandError = nil
       state = .ready
-      startHub()
     } catch {
       note("load failed: \(error.localizedDescription)")
       state = refreshToken == nil ? .signedOut : .unavailable(error.localizedDescription)
@@ -357,8 +331,8 @@ final class HubspaceClient: NSObject {
     note("\(method) \(URL(string: url)?.path ?? "") \(status)")
     // A token can be rejected before its stated expiry; refresh once and retry.
     if status == 401, !retried { return try await api(method, url, json: json, retried: true) }
-    // 424: Hubspace has no path to the bulb (not on Wi-Fi and no Bluetooth hub nearby yet).
-    if status == 424 { throw Failure("Can't reach the bulb yet. Keep your phone near it for a few seconds.") }
+    // 424: Hubspace can't reach the bulb because it isn't on Wi-Fi.
+    if status == 424 { throw Failure("The bulb is offline. Finish its Wi-Fi setup in the Hubspace app.") }
     guard (200..<300).contains(status) else {
       // The error body says why (e.g. which field the hub join rejected).
       note("\(status) body: " + String(decoding: data.prefix(300), as: UTF8.self))

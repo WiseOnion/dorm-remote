@@ -15,10 +15,6 @@ targets:
     platform: iOS
     sources:
       - DormRemote
-    dependencies:
-      # Fetched by scripts/fetch-softhub.sh before xcodegen runs.
-      - framework: Vendor/AferoSofthub.xcframework
-        embed: true
     settings:
       base:
         INFOPLIST_FILE: Support/Info.plist
