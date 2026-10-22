@@ -29,10 +29,10 @@ enum BulbProtocol: String, Codable {
   func color(_ c: RGB, brightness: Int) -> [Data] {
     switch self {
     case .elk:
-      [Data([0x7E, 0x00, 0x05, 0x03, UInt8(c.r), UInt8(c.g), UInt8(c.b), 0x0A, 0xEF]), level(brightness)]
+      return [Data([0x7E, 0x00, 0x05, 0x03, UInt8(c.r), UInt8(c.g), UInt8(c.b), 0x0A, 0xEF]), level(brightness)]
     case .triones:
       let s = { (v: Int) in UInt8(min(255, v * max(1, brightness) / 100)) }
-      [Data([0x56, s(c.r), s(c.g), s(c.b), 0x00, 0xF0, 0xAA])]
+      return [Data([0x56, s(c.r), s(c.g), s(c.b), 0x00, 0xF0, 0xAA])]
     }
   }
 
