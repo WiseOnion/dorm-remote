@@ -10,6 +10,17 @@ enum Daybetter {
   static let mode: UInt8 = 0x12
   static let brightness: UInt8 = 0x13
   static let color: UInt8 = 0x15
+  static let speed: UInt8 = 0x16
+  static let rhythm: UInt8 = 0x21
+  /// Mode id for the controller's own microphone; the sub-mode picks the style (0 Classic … 3 Disco).
+  static let micMode: UInt8 = 160
+
+  /// DayBetter names its strips by model code, e.g. P031_3712.
+  static func looksLikeStrip(_ name: String) -> Bool {
+    let upper = name.uppercased()
+    return upper.wholeMatch(of: #/P0[0-9A-F]{2}_.*/#) != nil
+      || ["SMART LIGHT", "MAGIC LIGHT", "DAYBETTER", "CCHIP"].contains { upper.contains($0) }
+  }
   static let cchip: [UInt8] = Array("CCHIP".utf8)
 
   /// Controller revisions use different GATT IDs. Most follow E0xx service → A0xx write / F0xx notify.
@@ -67,6 +78,9 @@ final class StripController: NSObject {
   // Sources disagree on 3-byte RGB vs 4-byte RGBW color. Start with RGB; switch if the strip rejects it.
   private var useRGBW = false
   private var lastColor: (UInt8, UInt8, UInt8) = (255, 255, 255)
+  /// A built-in effect is running; colors need static mode back first.
+  private var effectMode = false
+  private var rhythmOn = false
   private var handshakeTimer: Timer?
   private var connectTimer: Timer?
   /// The user tapped Disconnect; don't reconnect on our own.
@@ -115,7 +129,35 @@ final class StripController: NSObject {
 
   func setColor(r: UInt8, g: UInt8, b: UInt8) {
     lastColor = (r, g, b)
+    if effectMode {
+      stopRhythm()
+      send(Daybetter.frame(Daybetter.mode, [0x01, 0x00]))
+      effectMode = false
+    }
     send(colorFrame())
+  }
+
+  /// Built-in patterns run on the strip itself, so they keep going after the app closes.
+  func setPattern(_ id: UInt8) {
+    stopRhythm()
+    send(Daybetter.frame(Daybetter.mode, [id, 0xFF]))
+    effectMode = true
+  }
+
+  func setSpeed(_ percent: Int) { send(Daybetter.frame(Daybetter.speed, [UInt8(max(1, min(100, percent)))])) }
+
+  /// Music from the microphone in the strip's controller.
+  func setMicMusic(style: UInt8) {
+    send(Daybetter.frame(Daybetter.mode, [Daybetter.micMode, style]))
+    send(Daybetter.frame(Daybetter.rhythm, [0x01]))
+    rhythmOn = true
+    effectMode = true
+  }
+
+  private func stopRhythm() {
+    guard rhythmOn else { return }
+    send(Daybetter.frame(Daybetter.rhythm, [0x00]))
+    rhythmOn = false
   }
 
   private func colorFrame() -> Data {
@@ -284,6 +326,8 @@ extension StripController: CBCentralManagerDelegate {
     connectedName = nil
     inFlight = false
     pending = []
+    effectMode = false
+    rhythmOn = false
     note("disconnected \(error?.localizedDescription ?? "")")
     // Keep an error on screen, and don't fight a scan the user started.
     if case .failed = state { return }

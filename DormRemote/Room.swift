@@ -19,10 +19,18 @@ struct RGB: Equatable, Codable {
     return RGB(r: clamp(r), g: clamp(g), b: clamp(b))
   }
 
-  static func hue(_ h: Double) -> RGB {
+  static func hue(_ h: Double, saturation: Double = 1) -> RGB {
     var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-    UIColor(hue: h.truncatingRemainder(dividingBy: 1), saturation: 1, brightness: 1, alpha: 1).getRed(&r, green: &g, blue: &b, alpha: &a)
-    return RGB(r: Int(r * 255), g: Int(g * 255), b: Int(b * 255))
+    let wrapped = h - floor(h)
+    UIColor(hue: wrapped, saturation: saturation, brightness: 1, alpha: 1).getRed(&r, green: &g, blue: &b, alpha: &a)
+    return RGB(r: Int((r * 255).rounded()), g: Int((g * 255).rounded()), b: Int((b * 255).rounded()))
+  }
+
+  /// Hue and saturation, 0–1, for placing the color wheel's knob.
+  var hueSaturation: (Double, Double) {
+    var h: CGFloat = 0, s: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0
+    UIColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1).getHue(&h, saturation: &s, brightness: &v, alpha: &a)
+    return (Double(h), Double(s))
   }
 
   var color: Color { Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255) }
@@ -71,10 +79,44 @@ struct Mood: Identifiable {
   }
 }
 
+/// Strip effects. Patterns and strip-mic music run on the controller; phone-mic music runs in the app.
+enum Effect: Hashable {
+  case pattern(UInt8), stripMic(UInt8), phoneMic
+
+  struct Pattern: Identifiable {
+    let name: String
+    let id: UInt8
+    let colors: [RGB]
+  }
+
+  static let rainbow = [RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 160, b: 0), RGB(r: 255, g: 255, b: 0), RGB(r: 0, g: 255, b: 0),
+                        RGB(r: 0, g: 200, b: 255), RGB(r: 0, g: 0, b: 255), RGB(r: 160, g: 0, b: 255)]
+  static let three = [RGB(r: 255, g: 0, b: 0), RGB(r: 0, g: 255, b: 0), RGB(r: 0, g: 0, b: 255)]
+
+  // Mode ids from DoudGeorges/daybetter-leds PROTOCOL.md (QC family).
+  static let patterns = [
+    Pattern(name: "Rainbow fade", id: 12, colors: rainbow),
+    Pattern(name: "Rainbow jump", id: 10, colors: rainbow),
+    Pattern(name: "RGB fade", id: 11, colors: three),
+    Pattern(name: "RGB jump", id: 9, colors: three),
+    Pattern(name: "Strobe", id: 23, colors: rainbow),
+    Pattern(name: "Red pulse", id: 13, colors: [RGB(r: 255, g: 0, b: 0), RGB(r: 60, g: 0, b: 0)]),
+  ]
+
+  static let micStyles = ["Classic", "Soft", "Dynamic", "Disco"]
+
+  var name: String {
+    switch self {
+    case .pattern(let id): Self.patterns.first { $0.id == id }?.name ?? "Pattern"
+    case .stripMic(let style): Self.micStyles[Int(style)]
+    case .phoneMic: "Phone mic"
+    }
+  }
+}
+
 @MainActor
 @Observable
 final class Room {
-  enum Effect: String, CaseIterable { case music = "Music", rainbow = "Rainbow" }
 
   static let all = "all"
   static let stripID = "strip"
@@ -91,11 +133,12 @@ final class Room {
   // The strip never reports its state, so remember what we last sent.
   private var stripLook: LightItem
   private var names: [String: String]
-  private var timer: Timer?
   private var engine: AVAudioEngine?
   private var hue = 0.0
   private var lastBeat = Date.distantPast
   private var average: Double = 0
+  /// Effect speed, 1–100.
+  private(set) var speed = UserDefaults.standard.object(forKey: "speed") as? Int ?? 50
 
   init(strip: StripController, hubspace: HubspaceClient) {
     self.strip = strip
@@ -212,7 +255,7 @@ final class Room {
       case .party: paint(light, RGB(r: 255, g: 0, b: 180))
       }
     }
-    if case .party = m.look, ready.contains(where: { $0.kind == .strip }) { start(.music) }
+    if case .party = m.look, ready.contains(where: { $0.kind == .strip }) { start(.pattern(10)) }
     mood = m.id
   }
 
@@ -279,36 +322,27 @@ final class Room {
 
   // MARK: Effects (strip only: the bulb goes through Home Depot's cloud, too slow to follow a beat)
 
-  func toggle(_ e: Effect) {
-    if effect == e { stopEffect() } else { start(e) }
-  }
-
   func start(_ e: Effect) {
     stopEffect()
     effectError = nil
     guard strip.state == .connected else { return }
     wakeStrip()
+    mood = nil
     effect = e
     switch e {
-    case .rainbow:
-      // ponytail: runs only while the app is open; the strip's built-in effects would keep going,
-      // but their mode numbers aren't documented for this controller.
-      timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-        MainActor.assumeIsolated {
-          guard let self else { return }
-          self.hue += 0.004
-          let c = RGB.hue(self.hue)
-          self.strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b))
-        }
-      }
-    case .music:
+    case .pattern(let id):
+      strip.setPattern(id)
+      strip.setSpeed(speed)
+    case .stripMic(let style):
+      strip.setMicMusic(style: style)
+    case .phoneMic:
       Task {
         guard await AVAudioApplication.requestRecordPermission() else {
-          effectError = "Allow the microphone in Settings to use Music."
+          effectError = "Allow the microphone in Settings to use your phone's mic."
           effect = nil
           return
         }
-        guard effect == .music else { return }
+        guard effect == .phoneMic else { return }
         do { try listen() } catch {
           effectError = "Couldn't start the microphone."
           stopEffect()
@@ -317,9 +351,14 @@ final class Room {
     }
   }
 
+  func setSpeed(_ value: Int) {
+    speed = value
+    UserDefaults.standard.set(value, forKey: "speed")
+    strip.setSpeed(value)
+  }
+
+  /// Forgets the running effect. The strip leaves a built-in effect on its next color.
   func stopEffect() {
-    timer?.invalidate()
-    timer = nil
     if let engine {
       engine.inputNode.removeTap(onBus: 0)
       engine.stop()
@@ -351,7 +390,7 @@ final class Room {
 
   /// ~20 updates a second. Loudness drives brightness; a jump above the running average is a beat and shifts the color.
   private func onSound(_ rms: Double) {
-    guard effect == .music else { return }
+    guard effect == .phoneMic else { return }
     let db = 20 * log10(max(rms, 1e-6))
     let loud = max(0, min(1, (db + 55) / 45))
     level = max(loud, level * 0.8)

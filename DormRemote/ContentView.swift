@@ -1,20 +1,23 @@
 import SwiftUI
 import UIKit
 
-// Design: black canvas, one soft glow in the color of whatever is on, flat tiles, no borders.
+// Design: black canvas, flat cards, and each light's own color as the only accent.
+// Layout follows the Hubspace light screen (mode circles, brightness bar, presets, wheel)
+// with DayBetter's patterns and music on top.
 private enum Ink {
   static let bg = Color.black
-  static let tile = Color(hex: 0x141416)
-  static let raised = Color(hex: 0x1F1F23)
+  static let card = Color(hex: 0x141416)
+  static let raised = Color(hex: 0x232328)
   static let text = Color(hex: 0xF5F5F7)
   static let dim = Color(hex: 0x8E8E93)
+  static let bad = Color(hex: 0xFF6B5E)
 }
 
 private enum Sheet: Identifiable {
-  case control(String), stripSetup, hubSetup, projector, log
+  case light(String), stripSetup, hubSetup, projector, log
   var id: String {
     switch self {
-    case .control(let id): "control-" + id
+    case .light(let id): "light-" + id
     case .stripSetup: "strip"
     case .hubSetup: "hub"
     case .projector: "projector"
@@ -31,9 +34,13 @@ struct ContentView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 32) {
         header
-        if !room.ready.isEmpty { roomBrightness }
-        moods
-        lights
+        scenes
+        VStack(alignment: .leading, spacing: 12) {
+          SectionTitle("Lights")
+          ForEach(room.items) { item in
+            LightRow(room: room, item: item) { open(item) }
+          }
+        }
       }
       .padding(.horizontal, 20)
       .padding(.top, 16)
@@ -42,10 +49,11 @@ struct ContentView: View {
     .scrollIndicators(.hidden)
     .background(glow)
     .foregroundStyle(Ink.text)
+    .tint(Ink.text)
     .sheet(item: $sheet) { sheet in
       Group {
         switch sheet {
-        case .control(let id): ControlSheet(room: room, id: id)
+        case .light(let id): LightSheet(room: room, id: id)
         case .stripSetup: StripSetup(strip: room.strip)
         case .hubSetup: HubSetup(hubspace: room.hubspace)
         case .projector: ProjectorInfo()
@@ -53,7 +61,7 @@ struct ContentView: View {
         }
       }
       .presentationDragIndicator(.visible)
-      .presentationBackground(Ink.tile)
+      .presentationBackground(Ink.card)
       .preferredColorScheme(.dark)
     }
   }
@@ -62,7 +70,7 @@ struct ContentView: View {
     ZStack {
       Ink.bg
       if let ambient = room.ambient {
-        RadialGradient(colors: [ambient.opacity(0.45), .clear], center: .top, startRadius: 0, endRadius: 520)
+        RadialGradient(colors: [ambient.opacity(0.4), .clear], center: .top, startRadius: 0, endRadius: 480)
       }
     }
     .ignoresSafeArea()
@@ -70,7 +78,7 @@ struct ContentView: View {
   }
 
   private var header: some View {
-    HStack(alignment: .center) {
+    HStack(alignment: .center, spacing: 8) {
       VStack(alignment: .leading, spacing: 4) {
         Text("My Room")
           .font(.system(size: 34, weight: .bold, design: .rounded))
@@ -86,6 +94,7 @@ struct ContentView: View {
           .frame(width: 44, height: 44)
           .foregroundStyle(Ink.dim)
       }
+      .accessibilityLabel("More")
       PowerButton(on: room.anyOn, tint: room.ambient ?? .white) {
         room.setPower(Room.all, !room.anyOn)
       }
@@ -97,25 +106,12 @@ struct ContentView: View {
     let ready = room.ready
     if ready.isEmpty { return "Tap a light to set it up" }
     let on = ready.filter(\.on).count
-    return on == 0 ? "All off" : on == ready.count ? "All on" : "\(on) of \(ready.count) on"
+    return on == 0 ? "Everything's off" : on == ready.count ? "Everything's on" : "\(on) of \(ready.count) on"
   }
 
-  private var roomBrightness: some View {
-    PillSlider(
-      value: Binding(
-        get: { Double(room.look(Room.all)?.brightness ?? 100) / 100 },
-        set: { room.setBrightness(Room.all, Int(($0 * 100).rounded())) }
-      ),
-      fill: AnyShapeStyle(room.ambient ?? .white),
-      icon: "sun.max.fill",
-      label: "Brightness"
-    )
-    .frame(height: 56)
-  }
-
-  private var moods: some View {
+  private var scenes: some View {
     VStack(alignment: .leading, spacing: 12) {
-      SectionTitle("Moods")
+      SectionTitle("Scenes")
       ScrollView(.horizontal) {
         HStack(spacing: 16) {
           ForEach(Mood.all) { mood in
@@ -123,51 +119,36 @@ struct ContentView: View {
               VStack(spacing: 8) {
                 Circle()
                   .fill(AngularGradient(colors: mood.swatch + [mood.swatch[0]], center: .center))
-                  .frame(width: 56, height: 56)
-                  .overlay(Circle().strokeBorder(.white, lineWidth: room.mood == mood.id ? 2 : 0))
-                  .padding(3)
+                  .frame(width: 60, height: 60)
+                  .padding(4)
+                  .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
                 Text(mood.id)
-                  .font(.caption)
+                  .font(.caption.weight(.medium))
                   .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
               }
             }
             .buttonStyle(.plain)
-            .disabled(room.ready.isEmpty)
-            .opacity(room.ready.isEmpty ? 0.4 : 1)
           }
         }
       }
       .scrollIndicators(.hidden)
+      .disabled(room.ready.isEmpty)
+      .opacity(room.ready.isEmpty ? 0.4 : 1)
       .sensoryFeedback(.selection, trigger: room.mood)
-    }
-  }
-
-  private var lights: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      SectionTitle("Lights")
-      LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
-        ForEach(room.items) { item in
-          LightTile(item: item, effect: item.kind == .strip ? room.effect : nil) {
-            room.setPower(item.id, !item.on)
-          } open: {
-            open(item)
-          }
-        }
-      }
     }
   }
 
   private func open(_ item: LightItem) {
     switch (item.kind, item.status) {
     case (.projector, _): sheet = .projector
-    case (_, .ready): sheet = .control(item.id)
+    case (_, .ready): sheet = .light(item.id)
     case (.strip, _): sheet = .stripSetup
     case (.bulb, _): sheet = .hubSetup
     }
   }
 }
 
-// MARK: - Pieces
+// MARK: - Home pieces
 
 private struct SectionTitle: View {
   let text: String
@@ -175,7 +156,7 @@ private struct SectionTitle: View {
   var body: some View {
     Text(text.uppercased())
       .font(.caption.weight(.semibold))
-      .tracking(1.2)
+      .tracking(2)
       .foregroundStyle(Ink.dim)
   }
 }
@@ -200,280 +181,407 @@ private struct PowerButton: View {
   }
 }
 
-private struct LightTile: View {
+/// Glowing circle in the light's color, like the bulb icon in Hubspace's list.
+private struct Orb: View {
   let item: LightItem
-  let effect: Room.Effect?
-  let toggle: () -> Void
-  let open: () -> Void
-
-  private var lit: Bool { item.status == .ready && item.on }
+  var size: CGFloat = 52
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 0) {
-      Button(action: item.status == .ready ? toggle : open) {
-        Image(systemName: icon)
-          .font(.system(size: 20, weight: .medium))
-          .frame(width: 44, height: 44)
-          .foregroundStyle(lit ? .black : Ink.dim)
-          .background(Circle().fill(lit ? item.glow.color : Ink.raised))
-          .shadow(color: lit ? item.glow.color.opacity(0.7) : .clear, radius: 12)
-      }
-      .buttonStyle(.plain)
-      .accessibilityLabel(lit ? "Turn \(item.name) off" : "Turn \(item.name) on")
-      .sensoryFeedback(.impact(weight: .light), trigger: item.on)
-
-      Spacer(minLength: 20)
-
-      Button(action: open) {
-        VStack(alignment: .leading, spacing: 2) {
-          Text(item.name)
-            .font(.body.weight(.semibold))
-            .lineLimit(1)
-          Text(status)
-            .font(.footnote)
-            .foregroundStyle(statusColor)
-            .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-      }
-      .buttonStyle(.plain)
-    }
-    .padding(16)
-    .frame(maxWidth: .infinity, minHeight: 136, alignment: .topLeading)
-    .background(
-      RoundedRectangle(cornerRadius: 24, style: .continuous)
-        .fill(Ink.tile)
-        .overlay(
-          RoundedRectangle(cornerRadius: 24, style: .continuous)
-            .fill(LinearGradient(colors: [item.glow.color.opacity(lit ? 0.22 : 0), .clear], startPoint: .topLeading, endPoint: .bottomTrailing))
-        )
-    )
-    .opacity(item.kind == .projector ? 0.6 : 1)
-    .contentShape(RoundedRectangle(cornerRadius: 24))
-    .onTapGesture(perform: open)
-    .animation(.easeInOut(duration: 0.25), value: lit)
+    let lit = item.status == .ready && item.on
+    Image(systemName: icon)
+      .font(.system(size: size * 0.4, weight: .medium))
+      .frame(width: size, height: size)
+      .foregroundStyle(lit ? .black.opacity(0.75) : Ink.dim)
+      .background(Circle().fill(lit ? item.glow.color : Ink.raised))
+      .shadow(color: lit ? item.glow.color.opacity(0.8) : .clear, radius: 14)
+      .animation(.easeInOut(duration: 0.3), value: lit)
   }
 
   private var icon: String {
     switch item.kind {
     case .strip: "light.strip.2"
-    case .bulb: lit ? "lightbulb.fill" : "lightbulb"
-    case .projector: "moon.stars"
+    case .bulb: "lightbulb.fill"
+    case .projector: "moon.stars.fill"
     }
+  }
+}
+
+private struct LightRow: View {
+  var room: Room
+  let item: LightItem
+  let open: () -> Void
+
+  var body: some View {
+    VStack(spacing: 16) {
+      HStack(spacing: 16) {
+        Orb(item: item)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(item.name).font(.body.weight(.semibold)).lineLimit(1)
+          Text(status).font(.footnote).foregroundStyle(statusColor).lineLimit(1)
+        }
+        Spacer()
+        if item.status == .ready {
+          Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(item.id, $0) }))
+            .labelsHidden()
+            .tint(item.glow.color)
+        } else {
+          Image(systemName: "chevron.right").foregroundStyle(Ink.dim)
+        }
+      }
+      if item.status == .ready, item.on {
+        PillSlider(
+          value: Binding(get: { Double(item.brightness) / 100 }, set: { room.setBrightness(item.id, Int(($0 * 100).rounded())) }),
+          fill: AnyShapeStyle(item.glow.color),
+          label: "Brightness"
+        )
+        .frame(height: 36)
+      }
+    }
+    .padding(16)
+    .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.card))
+    .opacity(item.kind == .projector ? 0.55 : 1)
+    .contentShape(RoundedRectangle(cornerRadius: 24))
+    .onTapGesture(perform: open)
+    .sensoryFeedback(.impact(weight: .light), trigger: item.on)
+    .animation(.easeInOut(duration: 0.25), value: item.on)
+    .accessibilityElement(children: .contain)
+    .accessibilityAction(named: "Open \(item.name)", open)
   }
 
   private var status: String {
     switch item.status {
-    case .ready: item.on ? effect.map { "\($0.rawValue) · on" } ?? "\(item.brightness)%" : "Off"
-    case .setup: item.kind == .projector ? "Needs IR bridge" : "Tap to set up"
+    case .ready:
+      guard item.on else { return "Off" }
+      if item.kind == .strip, let effect = room.effect { return effect.name }
+      return item.kelvin.map { "\($0)K white" } ?? "Color"
+    case .setup: item.kind == .projector ? "Needs an IR bridge" : "Tap to set up"
     case .busy(let s): s + "…"
     case .offline(let s): s
     }
   }
 
   private var statusColor: Color {
-    if case .offline = item.status { return Color(hex: 0xFF6B5E) }
+    if case .offline = item.status { return Ink.bad }
     return Ink.dim
   }
 }
 
-/// Big Control Center-style slider. With a fill it grows from the left; without one it shows a thumb over the track.
+/// Wide pill slider that fills from the left, like Control Center.
 private struct PillSlider: View {
   @Binding var value: Double
-  var fill: AnyShapeStyle?
-  var track = AnyShapeStyle(Ink.raised)
-  var icon: String?
+  var fill: AnyShapeStyle
+  var range: ClosedRange<Double> = 0.01...1
   var label: String
+  var showsPercent = true
 
   var body: some View {
     GeometryReader { geo in
       let w = geo.size.width, h = geo.size.height
       ZStack(alignment: .leading) {
-        Capsule().fill(track)
-        if let fill {
-          Capsule().fill(fill).frame(width: max(h, w * value))
-        } else {
-          Circle()
-            .fill(.white)
-            .frame(width: h - 12, height: h - 12)
-            .shadow(radius: 4)
-            .offset(x: 6 + (w - h) * value)
+        Capsule().fill(Ink.raised)
+        Capsule().fill(fill).frame(width: max(h, w * value))
+        if showsPercent {
+          Text("\(Int((value * 100).rounded()))%")
+            .font(.footnote.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(value > 0.85 ? .black : Ink.text)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.horizontal, 14)
+            .allowsHitTesting(false)
         }
-        HStack(spacing: 8) {
-          if let icon { Image(systemName: icon) }
-          Text(label)
-          Spacer()
-          if fill != nil { Text("\(Int((value * 100).rounded()))%").monospacedDigit() }
-        }
-        .font(.subheadline.weight(.semibold))
-        .padding(.horizontal, 20)
-        .foregroundStyle(fill != nil && value > 0.5 ? .black : Ink.text)
-        .blendMode(fill != nil ? .normal : .difference)
-        .allowsHitTesting(false)
       }
       .clipShape(Capsule())
       .contentShape(Capsule())
       .gesture(DragGesture(minimumDistance: 0).onChanged { g in
-        value = max(0.01, min(1, g.location.x / w))
+        value = min(range.upperBound, max(range.lowerBound, g.location.x / w))
       })
     }
     .accessibilityElement()
     .accessibilityLabel(label)
     .accessibilityValue("\(Int(value * 100)) percent")
     .accessibilityAdjustableAction { dir in
-      value = max(0.01, min(1, value + (dir == .increment ? 0.1 : -0.1)))
+      value = min(range.upperBound, max(range.lowerBound, value + (dir == .increment ? 0.1 : -0.1)))
     }
   }
 }
 
-// MARK: - Control sheet
+/// Track with a draggable knob, for white temperature.
+private struct KnobSlider: View {
+  @Binding var value: Double
+  let track: AnyShapeStyle
+  let label: String
 
-private struct ControlSheet: View {
+  var body: some View {
+    GeometryReader { geo in
+      let w = geo.size.width, h = geo.size.height
+      ZStack(alignment: .leading) {
+        Capsule().fill(track)
+        Capsule()
+          .fill(.white)
+          .frame(width: h * 1.6, height: h - 8)
+          .shadow(color: .black.opacity(0.3), radius: 4)
+          .offset(x: 4 + (w - h * 1.6 - 8) * value)
+      }
+      .contentShape(Capsule())
+      .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+        value = min(1, max(0, g.location.x / w))
+      })
+    }
+    .accessibilityElement()
+    .accessibilityLabel(label)
+    .accessibilityAdjustableAction { dir in
+      value = min(1, max(0, value + (dir == .increment ? 0.1 : -0.1)))
+    }
+  }
+}
+
+// MARK: - Light sheet
+
+private struct LightSheet: View {
+  enum Mode: String, CaseIterable { case white = "White", color = "Color", effects = "Effects" }
+
   var room: Room
   let id: String
-  @State private var white = false
-  @State private var custom = Color.white
+  @State private var mode = Mode.color
   @State private var renaming = false
   @State private var newName = ""
   @Environment(\.dismiss) private var dismiss
 
   private static let swatches: [RGB] = [
-    RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 90, b: 30), RGB(r: 255, g: 190, b: 0), RGB(r: 0, g: 255, b: 80),
-    RGB(r: 0, g: 210, b: 255), RGB(r: 0, g: 60, b: 255), RGB(r: 140, g: 0, b: 255), RGB(r: 255, g: 0, b: 180),
-    RGB(r: 255, g: 50, b: 100), RGB(r: 0, g: 255, b: 170), RGB(r: 255, g: 255, b: 255),
+    RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 0, b: 200), RGB(r: 130, g: 0, b: 255), RGB(r: 0, g: 40, b: 255),
+    RGB(r: 0, g: 230, b: 255), RGB(r: 60, g: 255, b: 60), RGB(r: 255, g: 240, b: 0), RGB(r: 255, g: 100, b: 20),
   ]
+  private static let temperatures = [2200, 2700, 4000, 5000, 6500]
 
   var body: some View {
-    let look = room.look(id)
-    let isAll = id == Room.all
-    let hasStrip = isAll ? room.ready.contains(where: { $0.kind == .strip }) : look?.kind == .strip
-
-    ScrollView {
-      VStack(alignment: .leading, spacing: 28) {
-        HStack {
-          VStack(alignment: .leading, spacing: 4) {
-            Text(isAll ? "All lights" : look?.name ?? "Light")
-              .font(.system(size: 28, weight: .bold, design: .rounded))
-            Text(look?.on == true ? "On" : "Off").foregroundStyle(Ink.dim)
-          }
-          Spacer()
-          PowerButton(on: look?.on ?? false, tint: look?.glow.color ?? .white) {
-            room.setPower(id, !(look?.on ?? false))
-          }
-        }
-
-        PillSlider(
-          value: Binding(
-            get: { Double(look?.brightness ?? 100) / 100 },
-            set: { room.setBrightness(id, Int(($0 * 100).rounded())) }
-          ),
-          fill: AnyShapeStyle(look?.glow.color ?? .white),
-          icon: "sun.max.fill",
-          label: "Brightness"
-        )
-        .frame(height: 64)
-
-        Picker("Mode", selection: $white) {
-          Text("Color").tag(false)
-          Text("White").tag(true)
-        }
-        .pickerStyle(.segmented)
-
-        if white {
-          PillSlider(
-            value: Binding(
-              get: { (Double(look?.kelvin ?? 4000) - 2200) / 4300 },
-              set: { room.setWhite(id, Int(2200 + $0 * 4300)) }
-            ),
-            track: AnyShapeStyle(LinearGradient(colors: [RGB.kelvin(2200).color, RGB.kelvin(4000).color, RGB.kelvin(6500).color],
-                                                startPoint: .leading, endPoint: .trailing)),
-            label: "\(look?.kelvin ?? 4000)K"
-          )
-          .frame(height: 56)
-        } else {
-          LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 6), spacing: 12) {
-            ForEach(Self.swatches.indices, id: \.self) { i in
-              let c = Self.swatches[i]
-              Button { room.setColor(id, c) } label: {
-                Circle()
-                  .fill(c.color)
-                  .frame(height: 44)
-                  .overlay(Circle().strokeBorder(.white, lineWidth: look?.kelvin == nil && look?.color == c ? 2 : 0).padding(-4))
-              }
-              .buttonStyle(.plain)
-              .accessibilityLabel("Color \(i + 1)")
-            }
-            ColorPicker("Custom color", selection: $custom, supportsOpacity: false)
+    if let item = room.item(id) {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 28) {
+          HStack(spacing: 16) {
+            Orb(item: item, size: 44)
+            Text(item.name)
+              .font(.system(size: 26, weight: .bold, design: .rounded))
+              .lineLimit(1)
+            Spacer()
+            Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(id, $0) }))
               .labelsHidden()
-              .frame(height: 44)
-              .onChange(of: custom) { _, new in
-                let (r, g, b) = new.rgb
-                room.setColor(id, RGB(r: r, g: g, b: b))
-              }
+              .tint(item.glow.color)
           }
-        }
 
-        if hasStrip {
+          modePicker(item)
+
           VStack(alignment: .leading, spacing: 12) {
-            SectionTitle(isAll ? "Strip effects" : "Effects")
-            HStack(spacing: 12) {
-              ForEach(Room.Effect.allCases, id: \.self) { e in
-                Button { room.toggle(e) } label: {
-                  HStack {
-                    Image(systemName: e == .music ? "waveform" : "rainbow")
-                    Text(e.rawValue)
-                  }
-                  .font(.subheadline.weight(.semibold))
-                  .frame(maxWidth: .infinity, minHeight: 52)
-                  .foregroundStyle(room.effect == e ? .black : Ink.text)
-                  .background(Capsule().fill(room.effect == e ? AnyShapeStyle(.white) : AnyShapeStyle(Ink.raised)))
-                }
-                .buttonStyle(.plain)
-              }
-            }
-            if room.effect == .music {
-              Capsule()
-                .fill(Ink.raised)
-                .overlay(alignment: .leading) {
-                  GeometryReader { geo in
-                    Capsule().fill(.white).frame(width: geo.size.width * room.level)
-                  }
-                }
-                .frame(height: 6)
-                .animation(.linear(duration: 0.05), value: room.level)
-              Text("Listening through the mic. Play music near your phone.")
-                .font(.footnote).foregroundStyle(Ink.dim)
-            }
-            if let error = room.effectError {
-              Text(error).font(.footnote).foregroundStyle(Color(hex: 0xFF6B5E))
-            }
+            Label("Brightness", systemImage: "sun.max")
+              .font(.subheadline.weight(.semibold))
+              .foregroundStyle(Ink.dim)
+            PillSlider(
+              value: Binding(get: { Double(item.brightness) / 100 }, set: { room.setBrightness(id, Int(($0 * 100).rounded())) }),
+              fill: AnyShapeStyle(item.glow.color),
+              label: "Brightness"
+            )
+            .frame(height: 48)
           }
-        }
 
-        if !isAll, let look {
-          footer(look)
+          switch mode {
+          case .white: whiteControls(item)
+          case .color: colorControls(item)
+          case .effects: effectControls
+          }
+
+          if item.kind == .bulb, mode != .effects {
+            Text("The bulb takes commands through Hubspace's cloud, so it has to be on Wi-Fi. Changes can take a second.")
+              .font(.footnote)
+              .foregroundStyle(Ink.dim)
+          }
+
+          footer(item)
         }
+        .padding(24)
+        .padding(.top, 8)
       }
-      .padding(24)
-    }
-    .onAppear { white = look?.kelvin != nil }
-    .alert("Rename", isPresented: $renaming) {
-      TextField("Name", text: $newName)
-      Button("Save") { room.rename(id, to: newName) }
-      Button("Cancel", role: .cancel) {}
+      .onAppear {
+        mode = item.kind == .strip && room.effect != nil ? .effects : item.kelvin != nil ? .white : .color
+      }
+      .alert("Rename", isPresented: $renaming) {
+        TextField("Name", text: $newName)
+        Button("Save") { room.rename(id, to: newName) }
+        Button("Cancel", role: .cancel) {}
+      }
+    } else {
+      // The light went away (strip forgotten, signed out).
+      Color.clear.onAppear { dismiss() }
     }
   }
 
-  private func footer(_ look: LightItem) -> some View {
+  private func modePicker(_ item: LightItem) -> some View {
+    let modes: [Mode] = item.kind == .strip ? Mode.allCases : [.white, .color]
+    return HStack(spacing: 0) {
+      ForEach(modes, id: \.self) { m in
+        Button { mode = m } label: {
+          VStack(spacing: 8) {
+            modeCircle(m)
+              .frame(width: 60, height: 60)
+              .padding(5)
+              .overlay(Circle().strokeBorder(Ink.text.opacity(mode == m ? 0.9 : 0), lineWidth: 2))
+            Text(m.rawValue)
+              .font(.caption.weight(.medium))
+              .foregroundStyle(mode == m ? Ink.text : Ink.dim)
+          }
+          .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(mode == m ? .isSelected : [])
+      }
+    }
+    .sensoryFeedback(.selection, trigger: mode)
+  }
+
+  @ViewBuilder
+  private func modeCircle(_ m: Mode) -> some View {
+    switch m {
+    case .white:
+      Circle().fill(AngularGradient(colors: [RGB.kelvin(2200).color, .white, RGB.kelvin(6500).color, Color(hex: 0x9FC9F0), RGB.kelvin(2200).color], center: .center))
+    case .color:
+      Circle().fill(AngularGradient(colors: (0...12).map { RGB.hue(Double($0) / 12).color }, center: .center))
+    case .effects:
+      Circle()
+        .fill(LinearGradient(colors: [Color(hex: 0xFFD54A), Color(hex: 0xFF9F1C)], startPoint: .top, endPoint: .bottom))
+        .overlay(Image(systemName: "play.fill").font(.title2).foregroundStyle(.white))
+    }
+  }
+
+  private func whiteControls(_ item: LightItem) -> some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Label("White temperature  \(item.kelvin ?? 4000)K", systemImage: "thermometer.medium")
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Ink.dim)
+      KnobSlider(
+        value: Binding(get: { (Double(item.kelvin ?? 4000) - 2200) / 4300 },
+                       set: { room.setWhite(id, Int((2200 + $0 * 4300) / 50) * 50) }),
+        track: AnyShapeStyle(LinearGradient(colors: [RGB.kelvin(2200).color, .white, Color(hex: 0x9FC9F0)], startPoint: .leading, endPoint: .trailing)),
+        label: "White temperature"
+      )
+      .frame(height: 48)
+      HStack {
+        ForEach(Self.temperatures, id: \.self) { k in
+          Button { room.setWhite(id, k) } label: {
+            Circle()
+              .fill(RGB.kelvin(k).color)
+              .frame(width: 48, height: 48)
+              .padding(4)
+              .overlay(Circle().strokeBorder(Ink.text, lineWidth: item.kelvin == k ? 2 : 0))
+          }
+          .buttonStyle(.plain)
+          .frame(maxWidth: .infinity)
+          .accessibilityLabel("\(k) kelvin")
+        }
+      }
+    }
+  }
+
+  private func colorControls(_ item: LightItem) -> some View {
+    VStack(alignment: .leading, spacing: 20) {
+      Label("Presets", systemImage: "paintpalette")
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Ink.dim)
+      LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 4), spacing: 16) {
+        ForEach(Self.swatches.indices, id: \.self) { i in
+          let c = Self.swatches[i]
+          Button { room.setColor(id, c) } label: {
+            Circle()
+              .fill(c.color)
+              .frame(width: 52, height: 52)
+              .padding(4)
+              .overlay(Circle().strokeBorder(Ink.text, lineWidth: item.kelvin == nil && item.color == c ? 2 : 0))
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel("Preset color \(i + 1)")
+        }
+      }
+      ColorWheel(selected: item.kelvin == nil ? item.color : nil) { room.setColor(id, $0) }
+        .padding(.horizontal, 24)
+    }
+  }
+
+  private var effectControls: some View {
+    VStack(alignment: .leading, spacing: 20) {
+      Label("Patterns", systemImage: "sparkles")
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Ink.dim)
+      LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+        ForEach(Effect.patterns) { p in
+          effectCard(p.name, colors: p.colors.map(\.color), effect: .pattern(p.id))
+        }
+      }
+      if case .pattern = room.effect {
+        VStack(alignment: .leading, spacing: 12) {
+          Label("Speed", systemImage: "gauge.with.dots.needle.50percent")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(Ink.dim)
+          PillSlider(
+            value: Binding(get: { Double(room.speed) / 100 }, set: { room.setSpeed(Int(($0 * 100).rounded())) }),
+            fill: AnyShapeStyle(Ink.text),
+            label: "Speed"
+          )
+          .frame(height: 40)
+        }
+      }
+
+      Label("Music", systemImage: "waveform")
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Ink.dim)
+      LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+        ForEach(Effect.micStyles.indices, id: \.self) { i in
+          effectCard(Effect.micStyles[i], colors: [.pink, .purple, .cyan], effect: .stripMic(UInt8(i)))
+        }
+      }
+      effectCard("Use phone mic", colors: [.white, Ink.dim], effect: .phoneMic)
+      if room.effect == .phoneMic {
+        Capsule()
+          .fill(Ink.raised)
+          .overlay(alignment: .leading) {
+            GeometryReader { geo in Capsule().fill(.white).frame(width: geo.size.width * room.level) }
+          }
+          .frame(height: 6)
+          .animation(.linear(duration: 0.05), value: room.level)
+      }
+      Text("Patterns and music styles run on the strip itself and use its built-in mic, so they keep going when you close the app. If the strip has no mic, use your phone's mic instead (only while the app is open).")
+        .font(.footnote)
+        .foregroundStyle(Ink.dim)
+      if let error = room.effectError {
+        Text(error).font(.footnote).foregroundStyle(Ink.bad)
+      }
+    }
+  }
+
+  private func effectCard(_ name: String, colors: [Color], effect: Effect) -> some View {
+    let active = room.effect == effect
+    return Button { room.start(effect) } label: {
+      HStack(spacing: 12) {
+        Circle()
+          .fill(AngularGradient(colors: colors + [colors[0]], center: .center))
+          .frame(width: 28, height: 28)
+        Text(name).font(.subheadline.weight(.semibold)).lineLimit(1)
+        Spacer(minLength: 0)
+      }
+      .padding(.horizontal, 14)
+      .frame(maxWidth: .infinity, minHeight: 56)
+      .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(active ? Ink.text.opacity(0.14) : Ink.raised))
+      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Ink.text.opacity(active ? 0.9 : 0), lineWidth: 1.5))
+    }
+    .buttonStyle(.plain)
+    .accessibilityAddTraits(active ? .isSelected : [])
+  }
+
+  private func footer(_ item: LightItem) -> some View {
     HStack {
       Button("Rename") {
-        newName = look.name
+        newName = item.name
         renaming = true
       }
       Spacer()
-      Button(look.kind == .strip ? "Forget strip" : "Sign out", role: .destructive) {
-        if look.kind == .strip {
+      Button(item.kind == .strip ? "Forget strip" : "Sign out of Hubspace", role: .destructive) {
+        if item.kind == .strip {
           room.stopEffect()
           room.strip.disconnect()
         } else {
@@ -487,66 +595,120 @@ private struct ControlSheet: View {
   }
 }
 
+/// Hue around the edge, saturation toward the middle.
+private struct ColorWheel: View {
+  let selected: RGB?
+  let pick: (RGB) -> Void
+
+  var body: some View {
+    GeometryReader { geo in
+      let r = min(geo.size.width, geo.size.height) / 2
+      ZStack {
+        Circle().fill(AngularGradient(colors: (0...12).map { RGB.hue(Double($0) / 12).color }, center: .center))
+        Circle().fill(RadialGradient(colors: [.white, .white.opacity(0)], center: .center, startRadius: 0, endRadius: r))
+        if let selected {
+          let (h, s) = selected.hueSaturation
+          Circle()
+            .fill(selected.color)
+            .frame(width: 32, height: 32)
+            .overlay(Circle().strokeBorder(.white, lineWidth: 3))
+            .shadow(color: .black.opacity(0.4), radius: 4)
+            .offset(x: cos(h * 2 * .pi) * s * r, y: sin(h * 2 * .pi) * s * r)
+        }
+      }
+      .frame(width: r * 2, height: r * 2)
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .contentShape(Circle())
+      .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+        let dx = g.location.x - geo.size.width / 2, dy = g.location.y - geo.size.height / 2
+        let angle = atan2(dy, dx)
+        pick(RGB.hue(angle / (2 * .pi), saturation: min(1, (dx * dx + dy * dy).squareRoot() / r)))
+      })
+    }
+    .aspectRatio(1, contentMode: .fit)
+    .accessibilityLabel("Color wheel")
+  }
+}
+
 // MARK: - Setup
 
 private struct StripSetup: View {
   var strip: StripController
-  @State private var showFar = false
+  @State private var showOthers = false
   @Environment(\.dismiss) private var dismiss
 
   var body: some View {
-    let near = strip.devices.filter { showFar || $0.rssi > -80 }
-    VStack(alignment: .leading, spacing: 20) {
-      VStack(alignment: .leading, spacing: 8) {
-        Text("Add your LED strip").font(.system(size: 28, weight: .bold, design: .rounded))
-        Text("Close the DayBetter app first. Your strip is usually the top one, since it's closest.")
-          .foregroundStyle(Ink.dim)
-      }
-
-      switch strip.state {
-      case .connecting, .unlocking:
-        HStack {
-          ProgressView()
-          Text("Connecting…").foregroundStyle(Ink.dim)
-          Spacer()
-          Button("Cancel") { strip.cancelConnecting() }.frame(minHeight: 44)
+    let strips = strip.devices.filter { Daybetter.looksLikeStrip($0.name) }
+    let others = strip.devices.filter { !Daybetter.looksLikeStrip($0.name) }
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Add your LED strip").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Close the DayBetter app first. The strip only talks to one app at a time.")
+            .foregroundStyle(Ink.dim)
         }
-      case .off:
-        Text("Turn on Bluetooth.").foregroundStyle(Ink.dim)
-      case .failed(let message):
-        Text(message).foregroundStyle(Color(hex: 0xFF6B5E))
-        Button("Try again") { strip.scan() }
-      default:
-        if near.isEmpty {
+
+        switch strip.state {
+        case .connecting, .unlocking:
           HStack(spacing: 12) {
             ProgressView()
-            Text("Looking for lights nearby…").foregroundStyle(Ink.dim)
+            Text("Connecting…").foregroundStyle(Ink.dim)
+            Spacer()
+            Button("Cancel") { strip.cancelConnecting() }.frame(minHeight: 44)
           }
-        }
-        ScrollView {
-          VStack(spacing: 0) {
-            ForEach(near) { device in
-              Button { strip.connect(device) } label: {
-                HStack {
-                  Text(device.name)
-                  Spacer()
-                  SignalBars(rssi: device.rssi)
-                }
-                .frame(minHeight: 52)
-                .contentShape(Rectangle())
-              }
-              .buttonStyle(.plain)
-              Divider().overlay(Ink.raised)
+        case .off:
+          Text("Turn on Bluetooth.").foregroundStyle(Ink.dim)
+        case .failed(let message):
+          Text(message).foregroundStyle(Ink.bad)
+          Button("Try again") { strip.scan() }.frame(minHeight: 44)
+        default:
+          if strips.isEmpty {
+            HStack(spacing: 12) {
+              ProgressView()
+              Text("Looking for DayBetter strips…").foregroundStyle(Ink.dim)
             }
           }
-        }
-        Toggle("Show far-away devices", isOn: $showFar)
+          ForEach(strips) { device in
+            Button { strip.connect(device) } label: {
+              HStack(spacing: 16) {
+                Image(systemName: "light.strip.2")
+                  .frame(width: 44, height: 44)
+                  .background(Circle().fill(Ink.raised))
+                VStack(alignment: .leading, spacing: 2) {
+                  Text("DayBetter strip").font(.body.weight(.semibold))
+                  Text(device.name).font(.footnote).foregroundStyle(Ink.dim)
+                }
+                Spacer()
+                SignalBars(rssi: device.rssi)
+              }
+              .padding(16)
+              .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+            }
+            .buttonStyle(.plain)
+          }
+
+          DisclosureGroup("Not listed? Show all Bluetooth devices", isExpanded: $showOthers) {
+            VStack(spacing: 0) {
+              ForEach(others) { device in
+                Button { strip.connect(device) } label: {
+                  HStack {
+                    Text(device.name)
+                    Spacer()
+                    SignalBars(rssi: device.rssi)
+                  }
+                  .frame(minHeight: 48)
+                  .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+              }
+            }
+          }
           .font(.subheadline)
           .foregroundStyle(Ink.dim)
+        }
       }
-      Spacer(minLength: 0)
+      .padding(24)
     }
-    .padding(24)
     .onAppear { if strip.state == .idle { strip.scan() } }
     .onChange(of: strip.state) { _, new in if new == .connected { dismiss() } }
   }
@@ -555,7 +717,7 @@ private struct StripSetup: View {
 private struct SignalBars: View {
   let rssi: Int
   var body: some View {
-    let bars = rssi > -60 ? 3 : rssi > -75 ? 2 : 1
+    let bars = rssi > -65 ? 3 : rssi > -85 ? 2 : 1
     HStack(alignment: .bottom, spacing: 2) {
       ForEach(1...3, id: \.self) { i in
         RoundedRectangle(cornerRadius: 1)
@@ -575,45 +737,46 @@ private struct HubSetup: View {
   @Environment(\.dismiss) private var dismiss
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 20) {
-      VStack(alignment: .leading, spacing: 8) {
-        Text("Add your smart bulb").font(.system(size: 28, weight: .bold, design: .rounded))
-        Text("Sign in with your Hubspace account once. Your bulb then works from anywhere.")
-          .foregroundStyle(Ink.dim)
-      }
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Add your smart bulb").font(.system(size: 28, weight: .bold, design: .rounded))
+          Text("Sign in with your Hubspace account. The bulb has to be on Wi-Fi: Hubspace locks its Bluetooth, so this app reaches it through Hubspace's cloud.")
+            .foregroundStyle(Ink.dim)
+        }
 
-      switch hubspace.state {
-      case .needsCode:
-        Text("Hubspace emailed you a code.").foregroundStyle(Ink.dim)
-        if let error = hubspace.commandError {
-          Text(error).foregroundStyle(Color(hex: 0xFF6B5E)).font(.subheadline)
-        }
-        field("Code") {
-          TextField("", text: $code).keyboardType(.numberPad).textContentType(.oneTimeCode)
-        }
-        primary("Continue", disabled: code.isEmpty) { await hubspace.submitCode(code) }
-      case .signingIn, .loading:
-        ProgressView().frame(maxWidth: .infinity, minHeight: 52)
-      case .unavailable(let message):
-        Text("Couldn't reach Hubspace: \(message)").foregroundStyle(Color(hex: 0xFF6B5E))
-        primary("Try again", disabled: false) { await hubspace.load() }
-      default:
-        if case .loginFailed(let message) = hubspace.state {
-          Text(message).foregroundStyle(Color(hex: 0xFF6B5E)).font(.subheadline)
-        }
-        field("Email") {
-          TextField("", text: $email).textContentType(.username).keyboardType(.emailAddress).textInputAutocapitalization(.never)
-        }
-        field("Password") {
-          SecureField("", text: $password).textContentType(.password)
-        }
-        primary("Sign in", disabled: email.isEmpty || password.isEmpty) {
-          await hubspace.signIn(email: email, password: password)
+        switch hubspace.state {
+        case .needsCode:
+          Text("Hubspace emailed you a code.").foregroundStyle(Ink.dim)
+          if let error = hubspace.commandError {
+            Text(error).foregroundStyle(Ink.bad).font(.subheadline)
+          }
+          field("Code") {
+            TextField("", text: $code).keyboardType(.numberPad).textContentType(.oneTimeCode)
+          }
+          primary("Continue", disabled: code.isEmpty) { await hubspace.submitCode(code) }
+        case .signingIn, .loading:
+          ProgressView().frame(maxWidth: .infinity, minHeight: 52)
+        case .unavailable(let message):
+          Text("Couldn't reach Hubspace: \(message)").foregroundStyle(Ink.bad)
+          primary("Try again", disabled: false) { await hubspace.load() }
+        default:
+          if case .loginFailed(let message) = hubspace.state {
+            Text(message).foregroundStyle(Ink.bad).font(.subheadline)
+          }
+          field("Email") {
+            TextField("", text: $email).textContentType(.username).keyboardType(.emailAddress).textInputAutocapitalization(.never)
+          }
+          field("Password") {
+            SecureField("", text: $password).textContentType(.password)
+          }
+          primary("Sign in", disabled: email.isEmpty || password.isEmpty) {
+            await hubspace.signIn(email: email, password: password)
+          }
         }
       }
-      Spacer(minLength: 0)
+      .padding(24)
     }
-    .padding(24)
     .onChange(of: hubspace.state) { _, new in if new == .ready { dismiss() } }
   }
 
@@ -644,13 +807,11 @@ private struct HubSetup: View {
 private struct ProjectorInfo: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
-      Image(systemName: "moon.stars")
+      Image(systemName: "moon.stars.fill")
         .font(.system(size: 36))
         .foregroundStyle(Ink.dim)
       Text("Galaxy projector").font(.system(size: 28, weight: .bold, design: .rounded))
-      Text("The projector only listens to infrared, and iPhones don't have an IR blaster. A small ESP32 board with an IR LED (about $8) can act as a bridge: the app talks to it over Bluetooth, and it beams the remote's signals to the projector.")
-        .foregroundStyle(Ink.dim)
-      Text("Once the bridge is plugged in, this tile turns on.")
+      Text("The projector only takes infrared, and iPhones have no IR blaster. A small ESP32 board with an IR LED (about $8) can bridge it: the app talks to the board over Bluetooth, and the board sends the remote's signals.")
         .foregroundStyle(Ink.dim)
       Spacer(minLength: 0)
     }
@@ -685,13 +846,5 @@ private struct LogView: View {
 extension Color {
   init(hex: UInt32) {
     self.init(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
-  }
-
-  /// 0–255 components.
-  var rgb: (Int, Int, Int) {
-    var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-    UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
-    let byte = { (v: CGFloat) in Int((max(0, min(1, v)) * 255).rounded()) }
-    return (byte(r), byte(g), byte(b))
   }
 }

@@ -23,6 +23,21 @@ final class DaybetterTests: XCTestCase {
     XCTAssertEqual(hex(Daybetter.frame(Daybetter.color, [0xFF, 0, 0, 0])), "A0 15 07 FF 00 00 00 3C 1B")
   }
 
+  func testEffectFrames() {
+    XCTAssertEqual(hex(Daybetter.frame(Daybetter.mode, [0x01, 0x00])), "A0 12 05 01 00 B0 F0")
+    XCTAssertEqual(hex(Daybetter.frame(Daybetter.mode, [12, 0xFF])), "A0 12 05 0C FF F4 20")
+    XCTAssertEqual(hex(Daybetter.frame(Daybetter.speed, [50])), "A0 16 04 32 40 F5")
+    XCTAssertEqual(hex(Daybetter.frame(Daybetter.rhythm, [1])), "A0 21 04 01 B1 2E")
+    XCTAssertEqual(hex(Daybetter.frame(Daybetter.mode, [Daybetter.micMode, 3])), "A0 12 05 A0 03 89 61")
+  }
+
+  func testStripNames() {
+    XCTAssertTrue(Daybetter.looksLikeStrip("P031_3712"))
+    XCTAssertTrue(Daybetter.looksLikeStrip("Smart Light"))
+    XCTAssertFalse(Daybetter.looksLikeStrip("Echo Dot-107"))
+    XCTAssertFalse(Daybetter.looksLikeStrip("PX31_1"))
+  }
+
   func testCharacteristicsPerRevision() {
     let e026 = Daybetter.characteristics(for: CBUUID(string: "E026"))
     XCTAssertEqual(e026?.write, CBUUID(string: "A026"))
