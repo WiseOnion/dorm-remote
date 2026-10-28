@@ -40,11 +40,17 @@ def arch_points(n):
     return pts
 
 
-def render(background=True, mono=False):
+# Backgrounds per appearance (Apple / iOS 18 guidance: the default icon has a light or colored background, the dark
+# variant a dark one with the color in the foreground, the tinted one a grayscale image iOS colors in).
+COLORED = ((92, 52, 190), (36, 18, 92))   # violet: reads as a colored icon, still lets the LEDs glow
+DARK = ((22, 18, 36), (6, 6, 10))
+
+
+def render(background=DARK, mono=False):
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     if background:
         y = np.linspace(0, 1, S)[:, None]
-        top, bot = np.array([22, 18, 36]), np.array([6, 6, 10])
+        top, bot = np.array(background[0]), np.array(background[1])
         arr = np.zeros((S, S, 4), dtype=np.uint8)
         col = (top[None, :] * (1 - y) + bot[None, :] * y).astype(np.uint8)
         arr[:, :, :3] = col[:, None, :]
@@ -114,10 +120,9 @@ def render(background=True, mono=False):
 
 
 if __name__ == "__main__":
-    render().convert("RGB").save(OUT + "/AppIcon.png")
-    # Dark: same art; iOS shows dark icons on its own dark backdrop.
-    render().convert("RGB").save(OUT + "/AppIcon-Dark.png")
+    render(COLORED).convert("RGB").save(OUT + "/AppIcon.png")
+    render(DARK).convert("RGB").save(OUT + "/AppIcon-Dark.png")
     # Tinted: grayscale glyph on black, which iOS tints.
-    t = render(background=True, mono=True).convert("L").convert("RGB")
+    t = render(DARK, mono=True).convert("L").convert("RGB")
     t.save(OUT + "/AppIcon-Tinted.png")
     print("ok")
