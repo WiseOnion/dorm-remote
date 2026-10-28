@@ -848,8 +848,15 @@ private struct LightSheet: View {
 
   private var stripEffects: some View {
     VStack(alignment: .leading, spacing: 20) {
-      if let playing = room.effectPlaying(on: id), playing != .phoneMic {
+      if let playing = room.effectPlaying(on: id), playing != .phoneMic, playing != .candle, playing != .fire {
         speedSlider(Double(room.speed - 1) / 99) { room.setSpeed(1 + Int(($0 * 99).rounded())) }
+      }
+      heading("Cozy", "flame")
+      LazyVGrid(columns: Self.twoColumns, spacing: 12) {
+        effectCard("Candlelight", colors: [Color(hex: 0xFF8C1A), Color(hex: 0xFFB347), Color(hex: 0x7A3A00)],
+                   active: room.effectPlaying(on: id) == .candle) { room.start(.candle, on: id) }
+        effectCard("Fireplace", colors: [Color(hex: 0xFF3B00), Color(hex: 0xFF8A00), Color(hex: 0x5A1400)],
+                   active: room.effectPlaying(on: id) == .fire) { room.start(.fire, on: id) }
       }
       heading("In sync", "link")
       effectCard("Rainbow in sync", colors: Effect.rainbow.map(\.color), active: room.effectPlaying(on: id) == .synced) { room.start(.synced, on: id) }

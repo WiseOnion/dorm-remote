@@ -232,6 +232,22 @@ final class LookTests: XCTestCase {
     XCTAssertTrue(palette.contains { $0.b > 200 && $0.r < 60 }, "blue missing: \(palette)")
   }
 
+  func testFlamesStayWarmAndInRange() {
+    var level = 0.7
+    for i in 0..<500 {
+      let roll = Double((i * 37) % 100) / 100, hueRoll = Double((i * 53) % 100) / 100
+      for fire in [false, true] {
+        let (c, next) = Effect.flame(fire: fire, level: level, roll: roll, hueRoll: hueRoll)
+        XCTAssertTrue((0.35...1).contains(next))
+        // Warm: red leads, blue stays low, nothing goes black.
+        XCTAssertGreaterThan(c.r, c.g)
+        XCTAssertLessThan(c.b, 20)
+        XCTAssertGreaterThan(c.r, 80)
+        level = next
+      }
+    }
+  }
+
   func testVividKeepsHueAndWhite() {
     // Hue's pastel peach becomes a saturated orange on the strip; white stays white.
     let peach = RGB(r: 255, g: 183, b: 130).vivid

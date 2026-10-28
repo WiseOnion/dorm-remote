@@ -184,9 +184,9 @@ struct Mood: Identifiable, Codable {
   }
 }
 
-/// Strip effects. Built-in effects run on the controller; phone-mic music and the synced rainbow run in the app.
+/// Strip effects. Built-in effects run on the controller; phone-mic music, the synced rainbow, and the flames run in the app.
 enum Effect: Hashable {
-  case pattern(UInt8), phoneMic, synced
+  case pattern(UInt8), phoneMic, synced, candle, fire
 
   struct Pattern: Identifiable {
     let name: String
@@ -231,7 +231,26 @@ enum Effect: Hashable {
     case .pattern(let id): Self.patterns.first { $0.id == id }?.name ?? "Effect"
     case .phoneMic: "Phone mic"
     case .synced: "Rainbow in sync"
+    case .candle: "Candlelight"
+    case .fire: "Fireplace"
     }
+  }
+
+  /// One flame frame: a warm color whose level wanders. `level` is the strip's last level (0–1); the result keeps it
+  /// moving smoothly for a candle and in jumps for a fire. Kept here, without randomness of its own, so it can be tested.
+  static func flame(fire: Bool, level: Double, roll: Double, hueRoll: Double) -> (RGB, Double) {
+    let next: Double
+    if fire {
+      // Mostly mid to bright with sudden flares and dips.
+      next = max(0.35, min(1, level + (roll - 0.5) * 0.6))
+    } else {
+      // A candle sways gently around 70 % and rarely gutters.
+      let target = roll < 0.04 ? 0.35 : 0.7
+      next = max(0.4, min(0.95, level + (target - level) * 0.25 + (roll - 0.5) * 0.12))
+    }
+    let green = fire ? 40 + hueRoll * 90 : 110 + hueRoll * 30
+    let base = RGB(r: 255, g: Int(green), b: fire ? 0 : Int(hueRoll * 12))
+    return (RGB(r: Int(Double(base.r) * next), g: Int(Double(base.g) * next), b: Int(Double(base.b) * next)), next)
   }
 }
 
@@ -1005,6 +1024,16 @@ final class Room {
       syncTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
         MainActor.assumeIsolated { self?.syncStep() }
       }
+    case .candle, .fire:
+      // Full brightness once; the flicker lives in the color, so each frame is one write per strip.
+      for s in strips {
+        strip.setBrightness(s, 100)
+        updateLook(s) { $0.brightness = 100 }
+      }
+      flameLevels = [:]
+      syncTimer = Timer.scheduledTimer(withTimeInterval: e == .fire ? 0.09 : 0.14, repeats: true) { [weak self] _ in
+        MainActor.assumeIsolated { self?.flameStep() }
+      }
     case .phoneMic:
       Task {
         guard await AVAudioApplication.requestRecordPermission() else {
@@ -1044,6 +1073,19 @@ final class Room {
     hue += 0.1 / (60 - Double(speed - 1) * 57 / 99)
     let c = RGB.hue(hue)
     for s in effectStrips { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
+  }
+
+  private var flameLevels: [UUID: Double] = [:]
+
+  /// Each strip flickers on its own, so two strips look like two flames, not one copied.
+  private func flameStep() {
+    guard effect == .candle || effect == .fire else { return }
+    for s in effectStrips {
+      let (c, level) = Effect.flame(fire: effect == .fire, level: flameLevels[s] ?? 0.7,
+                                    roll: Double.random(in: 0...1), hueRoll: Double.random(in: 0...1))
+      flameLevels[s] = level
+      strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false)
+    }
   }
 
   /// Forgets the running effect. The strip leaves a built-in effect on its next color.
