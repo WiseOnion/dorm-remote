@@ -162,7 +162,13 @@ struct Mood: Identifiable, Codable {
       return true
     }
     guard drawn else { return [] }
-    return stride(from: 0, to: buffer.count, by: 4).map { RGB(r: Int(buffer[$0]), g: Int(buffer[$0 + 1]), b: Int(buffer[$0 + 2])) }
+    var pixels: [RGB] = []
+    pixels.reserveCapacity(side * side)
+    for i in stride(from: 0, to: buffer.count, by: 4) {
+      let r = Int(buffer[i]), g = Int(buffer[i + 1]), b = Int(buffer[i + 2])
+      pixels.append(RGB(r: r, g: g, b: b))
+    }
+    return pixels
   }
 
   /// Picks a few colors that stand out in a photo: drops dark and gray pixels, groups the rest by hue,
