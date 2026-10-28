@@ -674,8 +674,14 @@ final class Room {
     let on = roomReady.filter(\.on)
     guard !on.isEmpty else { return nil }
     let n = Double(on.count)
-    let sum = on.map(shown).reduce((0.0, 0.0, 0.0)) { ($0.0 + Double($1.r), $0.1 + Double($1.g), $0.2 + Double($1.b)) }
-    return Color(red: sum.0 / n / 255, green: sum.1 / n / 255, blue: sum.2 / n / 255)
+    var r = 0.0, g = 0.0, b = 0.0
+    for light in on {
+      let c = shown(light)
+      r += Double(c.r)
+      g += Double(c.g)
+      b += Double(c.b)
+    }
+    return Color(red: r / n / 255, green: g / n / 255, blue: b / n / 255)
   }
 
   /// Colors picked on the wheel, newest first, so a favorite is one tap away next time.
