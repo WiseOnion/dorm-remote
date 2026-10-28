@@ -310,7 +310,7 @@ final class LightScanner: NSObject {
 
   /// Where two aims at the same light cross: the midpoint of their closest approach. Nil when they're nearly parallel
   /// (under about 3° apart, too small a step to tell distance) or meet behind you.
-  private static func crossing(_ a: Ray, _ b: Ray) -> simd_float3? {
+  static func crossing(_ a: (origin: simd_float3, direction: simd_float3), _ b: (origin: simd_float3, direction: simd_float3)) -> simd_float3? {
     let d1 = simd_normalize(a.direction), d2 = simd_normalize(b.direction)
     let w = a.origin - b.origin
     let aa = simd_dot(d1, d1), bb = simd_dot(d1, d2), cc = simd_dot(d2, d2)
