@@ -1301,6 +1301,10 @@ final class Room {
     stopEffect()
     effectError = nil
     guard !lights.isEmpty else { return }
+    if case .pattern(let p) = e, Self.flashingGroups.contains(Effect.group(of: p)), !reduceFlashing, !flashWarned {
+      flashWarned = true
+      flashWarning = true
+    }
     mood = nil
     effect = e
     effectLights = Set(lights.map(\.id))
@@ -1533,6 +1537,46 @@ final class Room {
   /// Hides blink, flash and strobe effects and calms music mode, for anyone sensitive to flashing light.
   var reduceFlashing = UserDefaults.standard.bool(forKey: "reduceFlashing") {
     didSet { UserDefaults.standard.set(reduceFlashing, forKey: "reduceFlashing") }
+  }
+
+  /// Set the first time a flashing effect starts, so the app offers Reduce flashing once (Govee does the same;
+  /// a DayBetter reviewer with epilepsy bought strips for soft light and got flashing).
+  var flashWarning = false
+  private var flashWarned = UserDefaults.standard.bool(forKey: "flashWarned") {
+    didSet { UserDefaults.standard.set(flashWarned, forKey: "flashWarned") }
+  }
+
+  // MARK: Sleep timer
+
+  /// When the lights go out. iOS pauses the app once the phone locks, so the timer keeps the app open on a black
+  /// screen until then (SleepScreen). Reviewers of DayBetter's app ask for exactly this: a timer for falling asleep.
+  private(set) var sleepAt: Date?
+  private var sleepTask: Task<Void, Never>?
+
+  func sleep(in minutes: Int) {
+    cancelSleep()
+    let start = roomReady.filter(\.on).map(\.brightness).max() ?? 0
+    guard start > 0 else { return }
+    let total = Double(minutes * 60)
+    sleepAt = Date().addingTimeInterval(total)
+    sleepTask = Task { @MainActor [weak self] in
+      // Holds for the first half, then dims in ten steps, too slow to notice.
+      try? await Task.sleep(for: .seconds(total / 2))
+      for step in stride(from: 9, through: 1, by: -1) {
+        guard !Task.isCancelled, let self else { return }
+        self.setBrightness(Self.all, max(1, start * step / 10))
+        try? await Task.sleep(for: .seconds(total / 20))
+      }
+      guard !Task.isCancelled, let self else { return }
+      self.setPower(Self.all, false)
+      self.cancelSleep()
+    }
+  }
+
+  func cancelSleep() {
+    sleepTask?.cancel()
+    sleepTask = nil
+    sleepAt = nil
   }
 
   /// Effect groups that flash: blink, flash and strobe.

@@ -92,7 +92,7 @@ private struct Press: ButtonStyle {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, log
+  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, log, makeScene
   var id: String {
     switch self {
     case .light(let id): "light-" + id
@@ -103,6 +103,7 @@ private enum Sheet: Identifiable {
     case .lampSetup: "lamps"
     case .add: "add"
     case .log: "log"
+    case .makeScene: "makeScene"
     }
   }
 }
@@ -151,6 +152,17 @@ struct ContentView: View {
   @ToolbarContentBuilder
   private var roomToolbar: some ToolbarContent {
     ToolbarItemGroup(placement: .topBarTrailing) {
+      Menu {
+        Section("Fade out and turn off in") {
+          ForEach([15, 30, 60], id: \.self) { m in
+            Button("\(m) minutes") { room.sleep(in: m) }
+          }
+        }
+      } label: {
+        Image(systemName: "moon.zzz").font(.body.weight(.semibold))
+      }
+      .disabled(!room.anyOn)
+      .accessibilityLabel("Sleep timer")
       Button { sheet = .light(Room.all) } label: {
         Image(systemName: "slider.horizontal.3").font(.body.weight(.semibold))
       }
@@ -234,6 +246,9 @@ struct ContentView: View {
 
   private func presenting(_ content: some View) -> some View {
     content
+    .fullScreenCover(isPresented: Binding(get: { room.sleepAt != nil }, set: { if !$0 { room.cancelSleep() } })) {
+      SleepScreen(room: room)
+    }
     .sheet(item: $sheet) { sheet in
       Group {
         switch sheet {
@@ -256,6 +271,7 @@ struct ContentView: View {
           }
         }
         case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
+        case .makeScene: SceneMaker(room: room)
         }
       }
       .panel()
@@ -458,7 +474,7 @@ struct ContentView: View {
       }
       .scrollIndicators(.hidden)
       .sensoryFeedback(.selection, trigger: shown)
-      sceneRow(moods(in: shown), leading: shown == Mood.Group.mine.rawValue ? AnyView(HStack(alignment: .top, spacing: 16) { saveTile; photoTile }) : nil)
+      sceneRow(moods(in: shown), leading: shown == Mood.Group.mine.rawValue ? AnyView(HStack(alignment: .top, spacing: 16) { makeTile; saveTile; photoTile }) : nil)
         .id(shown)
         .transition(.opacity)
     }
@@ -570,6 +586,23 @@ struct ContentView: View {
     }
   }
 
+  /// Your own color combo: purple and orange for Halloween, blues and magentas for every night. The most common
+  /// wish in Lotus Lamp and DayBetter reviews.
+  private var makeTile: some View {
+    Button { sheet = .makeScene } label: {
+      VStack(spacing: 8) {
+        Image(systemName: "paintpalette")
+          .font(.title3.weight(.semibold))
+          .frame(width: 60, height: 60)
+          .background(Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])))
+          .padding(4)
+        Text("Pick colors").font(.caption.weight(.medium)).foregroundStyle(Ink.dim).frame(width: 72)
+      }
+    }
+    .buttonStyle(Press())
+    .accessibilityLabel("Make a scene from colors you pick")
+  }
+
   private var saveTile: some View {
     Button {
       sceneName = ""
@@ -606,6 +639,120 @@ struct ContentView: View {
   }
 }
 
+// MARK: - Sleep and scene maker
+
+/// The sleep timer's screen: black, so it doesn't light the room, and awake, because iOS pauses the app once the
+/// phone locks. Leave the phone on the charger; the lights fade, turn off, and the screen goes back to normal.
+private struct SleepScreen: View {
+  var room: Room
+
+  var body: some View {
+    TimelineView(.periodic(from: .now, by: 1)) { context in
+      let left = max(0, Int((room.sleepAt ?? .now).timeIntervalSince(context.date)))
+      VStack(spacing: 16) {
+        Spacer()
+        Image(systemName: "moon.zzz").font(.title2)
+        Text(left >= 60 ? "\(left / 60 + 1) min" : "\(left) s")
+          .font(.system(size: 48, weight: .semibold, design: .rounded).monospacedDigit())
+          .contentTransition(.numericText(countsDown: true))
+        Text("Lights fade, then turn off. Keep Dorm Remote open; the screen stays dark until then.")
+          .font(.footnote)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 280)
+        Spacer()
+        Button("Stop timer") { room.cancelSleep() }
+          .font(.body.weight(.semibold))
+          .frame(minHeight: 44)
+      }
+      // Dim on purpose: this is the only light left in the room.
+      .foregroundStyle(Color.white.opacity(0.28))
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+      .background(Color.black.ignoresSafeArea())
+    }
+    .statusBarHidden()
+    .persistentSystemOverlays(.hidden)
+    .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+    .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+  }
+}
+
+/// Pick up to five colors and save them as a scene. The lights share them out, and Drift moves between them.
+private struct SceneMaker: View {
+  var room: Room
+  @Environment(\.dismiss) private var dismiss
+  @State private var colors: [RGB] = []
+  @State private var current = RGB(r: 163, g: 91, b: 255)
+  @State private var name = ""
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Pick colors").font(.system(.title, design: .rounded, weight: .bold))
+          Text("Choose up to five. Your lights share them out, and Drift moves slowly between them.")
+            .foregroundStyle(Ink.dim)
+        }
+        HStack(spacing: 12) {
+          ForEach(Array(colors.enumerated()), id: \.offset) { i, c in
+            Button { colors.remove(at: i) } label: {
+              Circle().fill(c.color).frame(width: 44, height: 44)
+                .overlay(Image(systemName: "xmark").font(.caption.weight(.bold)).foregroundStyle(.black.opacity(0.6)))
+            }
+            .accessibilityLabel("Remove \(c.name)")
+          }
+          if colors.count < 5 {
+            Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])).frame(width: 44, height: 44)
+              .accessibilityHidden(true)
+          }
+        }
+        .animation(Motion.tap, value: colors)
+        ColorWheel(selected: current, pick: { current = $0 })
+          .frame(height: 260)
+          .frame(maxWidth: .infinity)
+        if !room.recentColors.isEmpty {
+          ScrollView(.horizontal) {
+            HStack(spacing: 12) {
+              ForEach(Array(room.recentColors.enumerated()), id: \.offset) { _, c in
+                Button { current = c } label: { Circle().fill(c.color).frame(width: 36, height: 36) }
+                  .accessibilityLabel(c.name)
+              }
+            }
+          }
+          .scrollIndicators(.hidden)
+        }
+        Button { colors.append(current) } label: {
+          Label("Add this color", systemImage: "plus")
+            .font(.body.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .background(Capsule().fill(Ink.raised))
+        }
+        .buttonStyle(Press())
+        .disabled(colors.count >= 5)
+        TextField("Name (optional)", text: $name)
+          .padding(.horizontal, 16)
+          .frame(minHeight: 52)
+          .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised))
+        Button {
+          room.savePalette(colors, named: name.trimmingCharacters(in: .whitespaces).isEmpty ? "My colors" : name)
+          dismiss()
+        } label: {
+          Text("Save and play")
+            .font(.body.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .foregroundStyle(.black)
+            .background(Capsule().fill(Ink.text))
+        }
+        .buttonStyle(Press())
+        .disabled(colors.isEmpty)
+        .opacity(colors.isEmpty ? 0.4 : 1)
+      }
+      .padding(24)
+    }
+    .scrollIndicators(.hidden)
+    .sensoryFeedback(.selection, trigger: colors.count)
+  }
+}
+
 // MARK: - Settings
 
 extension ContentView {
@@ -632,6 +779,11 @@ extension ContentView {
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
               Button(role: .destructive) { removing = item } label: { Label("Remove", systemImage: "trash") }
+            }
+            .swipeActions(edge: .leading) {
+              if item.status == .ready, item.caps.contains(.power) {
+                Button { room.identify(item.id) } label: { Label("Blink", systemImage: "light.max") }.tint(Ink.raised)
+              }
             }
           }
           Button { sheet = .add } label: { Label("Add a device", systemImage: "plus") }
@@ -808,6 +960,11 @@ private struct LightRow: View {
     .animation(Motion.state, value: item.on)
     .accessibilityElement(children: .contain)
     .accessibilityAction(named: "Open \(item.name)", open)
+    .contextMenu {
+      if item.status == .ready, item.caps.contains(.power) {
+        Button("Blink", systemImage: "light.max") { room.identify(item.id) }
+      }
+    }
   }
 
   private var status: String {
@@ -1002,6 +1159,15 @@ private struct LightSheet: View {
       .sheet(isPresented: $matching) {
         MatchSheet(room: room)
           .panel()
+      }
+      .alert("This effect flashes", isPresented: Binding(get: { room.flashWarning }, set: { room.flashWarning = $0 })) {
+        Button("Turn on Reduce flashing") {
+          room.reduceFlashing = true
+          room.endEffect()
+        }
+        Button("Keep it", role: .cancel) {}
+      } message: {
+        Text("Blink, flash and strobe effects can bother anyone sensitive to flashing light. Reduce flashing hides them; it's also in Settings.")
       }
       .alert("Rename", isPresented: $renaming) {
         TextField("Name", text: $newName)
@@ -1433,7 +1599,8 @@ private struct StripSetup: View {
 
   var body: some View {
     let isStrip = { (d: FoundDevice) in d.daybetter || Daybetter.looksLikeStrip(d.name) }
-    let strips = strip.devices.filter(isStrip)
+    // In a dorm, the neighbors' strips show up too: closest first, and say which one that is.
+    let strips = strip.devices.filter(isStrip).sorted { $0.rssi > $1.rssi }
     let others = strip.devices.filter { !isStrip($0) }
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
@@ -1488,7 +1655,8 @@ private struct StripSetup: View {
                   .background(Circle().fill(Ink.raised))
                 VStack(alignment: .leading, spacing: 2) {
                   Text("DayBetter strip").font(.body.weight(.semibold))
-                  Text(device.name).font(.footnote).foregroundStyle(Ink.dim)
+                  Text(strips.count > 1 && device.id == strips.first?.id ? "\(device.name) · closest to you" : device.name)
+                    .font(.footnote).foregroundStyle(Ink.dim)
                 }
                 Spacer()
                 SignalBars(rssi: device.rssi)
