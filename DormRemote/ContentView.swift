@@ -48,24 +48,6 @@ private struct RoomGlow: View {
   }
 }
 
-/// The top of each tab: a small label over a big title, the same on Room, Map and Automations.
-private struct PageTitle: View {
-  let eyebrow: String
-  let title: String
-  init(_ eyebrow: String, _ title: String) { self.eyebrow = eyebrow; self.title = title }
-
-  var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      Text(eyebrow.uppercased()).font(.caption2.weight(.heavy)).tracking(2.5).foregroundStyle(Ink.dim)
-      Text(title)
-        .font(.system(.largeTitle, design: .rounded, weight: .bold))
-        .contentTransition(.opacity)
-        .lineLimit(1)
-        .minimumScaleFactor(0.7)
-    }
-  }
-}
-
 extension View {
   /// Every sheet looks the same: dark card, rounded, with a grabber.
   fileprivate func panel() -> some View {
@@ -144,27 +126,52 @@ struct ContentView: View {
 
   private enum RoomEdit: Equatable { case add, rename(String) }
 
-  /// Three tabs, like Hue's app (Home, Automations…): what you use every day first, the room's layout, then what
-  /// runs by itself. Walk in, the map and schedules used to hide in the ⋯ menu.
+  /// Four tabs, after Hue's (Home, Automations, …, Settings): what you use every day first, then the room's layout,
+  /// what runs by itself, and setup you do once. Each tab has a native large title that shrinks as you scroll
+  /// (Apple's HIG suggests it for the top level of a tabbed app) and keeps its actions in the toolbar.
   var body: some View {
-    TabView {
-      roomTab
-        .tabItem { Label("Room", systemImage: "lightbulb.2.fill") }
+    presenting(TabView {
+      NavigationStack {
+        roomTab
+          .navigationTitle(room.currentRoom)
+          .toolbar { roomToolbar }
+      }
+      .tabItem { Label("Room", systemImage: "lightbulb.2.fill") }
       MapScreen(room: room)
         .tabItem { Label("Map", systemImage: "map.fill") }
       AutomationsTab(room: room)
         .tabItem { Label("Automations", systemImage: "clock.arrow.2.circlepath") }
+      settingsTab
+        .tabItem { Label("Settings", systemImage: "gearshape.fill") }
     }
     .tint(Ink.text)
-    .toolbarBackground(Ink.bg.opacity(0.7), for: .tabBar)
-    .preferredColorScheme(.dark)
+    .preferredColorScheme(.dark))
+  }
+
+  @ToolbarContentBuilder
+  private var roomToolbar: some ToolbarContent {
+    ToolbarItemGroup(placement: .topBarTrailing) {
+      Button { sheet = .light(Room.all) } label: {
+        Image(systemName: "slider.horizontal.3").font(.body.weight(.semibold))
+      }
+      .disabled(room.roomReady.filter { $0.kind != .remote }.isEmpty)
+      .accessibilityLabel("Room controls")
+      PowerButton(on: room.anyOn) { room.setPower(Room.all, !room.anyOn) }
+        .disabled(room.roomReady.isEmpty)
+        .contextMenu {
+          Button("Turn off every room", systemImage: "power") { room.setPower(Room.everything, false) }
+        }
+    }
   }
 
   private var roomTab: some View {
     // A List, so rows get the standard iOS swipe-left-to-delete.
     List {
       Group {
-        header.padding(.top, 16)
+        Text(summary)
+          .font(.subheadline)
+          .foregroundStyle(Ink.dim)
+          .contentTransition(.numericText())
         roomTabs
         nowPlaying
         scenes.padding(.top, 8)
@@ -205,11 +212,7 @@ struct ContentView: View {
           .padding(24)
           .card()
         }
-        Text("Swipe left on a device to remove it.")
-          .font(.footnote)
-          .foregroundStyle(Ink.dim)
-          .frame(maxWidth: .infinity)
-          .padding(.bottom, 24)
+        Color.clear.frame(height: 16)
       }
       .listRowBackground(Color.clear)
       .listRowSeparator(.hidden)
@@ -227,6 +230,10 @@ struct ContentView: View {
     .background(RoomGlow(room: room))
     .foregroundStyle(Ink.text)
     .tint(Ink.text)
+  }
+
+  private func presenting(_ content: some View) -> some View {
+    content
     .sheet(item: $sheet) { sheet in
       Group {
         switch sheet {
@@ -332,47 +339,6 @@ struct ContentView: View {
     }
     .scrollIndicators(.hidden)
     .sensoryFeedback(.selection, trigger: room.currentRoom)
-  }
-
-  private var header: some View {
-    HStack(alignment: .center, spacing: 8) {
-      VStack(alignment: .leading, spacing: 4) {
-        PageTitle("Dorm Remote", room.currentRoom)
-        Text(summary)
-          .font(.subheadline)
-          .foregroundStyle(Ink.dim)
-      }
-      Spacer()
-      Menu {
-        Button("Add a light", systemImage: "plus") { sheet = .add }
-        Toggle(isOn: Binding(get: { room.reduceFlashing }, set: { room.reduceFlashing = $0 })) {
-          Label("Reduce flashing", systemImage: "eye.trianglebadge.exclamationmark")
-        }
-        Button("Turn everything off", systemImage: "power") { room.setPower(Room.everything, false) }
-        if room.hubspace.state == .ready {
-          Button("Sign out of Hubspace", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { room.hubspace.signOut() }
-        }
-        Button("Show log", systemImage: "doc.text") { sheet = .log }
-      } label: {
-        Image(systemName: "ellipsis")
-          .frame(width: 44, height: 44)
-          .foregroundStyle(Ink.dim)
-      }
-      .accessibilityLabel("More")
-      Button { sheet = .light(Room.all) } label: {
-        Image(systemName: "slider.horizontal.3")
-          .font(.system(size: 17, weight: .semibold))
-          .frame(width: 44, height: 44)
-          .background(Circle().fill(Ink.raised))
-      }
-      .buttonStyle(Press())
-      .disabled(room.roomReady.filter { $0.kind != .remote }.isEmpty)
-      .accessibilityLabel("Room controls")
-      PowerButton(on: room.anyOn) {
-        room.setPower(Room.all, !room.anyOn)
-      }
-      .disabled(room.roomReady.isEmpty)
-    }
   }
 
   /// The effect playing in this room, live: each light's current color, the speed, and Stop. Effects start in a light's
@@ -495,9 +461,6 @@ struct ContentView: View {
       sceneRow(moods(in: shown), leading: shown == Mood.Group.mine.rawValue ? AnyView(HStack(alignment: .top, spacing: 16) { saveTile; photoTile }) : nil)
         .id(shown)
         .transition(.opacity)
-      Text("Tap a color scene again to shuffle its colors. Press and hold to favorite. Living makes color scenes drift while the app is open.")
-        .font(.footnote)
-        .foregroundStyle(Ink.dim)
     }
     .disabled(room.roomReady.isEmpty)
     .opacity(room.roomReady.isEmpty ? 0.4 : 1)
@@ -560,6 +523,7 @@ struct ContentView: View {
     }
     .buttonStyle(Press())
     .accessibilityLabel("\(mood.id) scene")
+    .accessibilityHint("Tap again to shuffle its colors. Press and hold to favorite.")
     .accessibilityAddTraits(room.mood == mood.id ? .isSelected : [])
     .contextMenu {
       let favorite = room.favorites.contains(mood.id)
@@ -642,6 +606,84 @@ struct ContentView: View {
   }
 }
 
+// MARK: - Settings
+
+extension ContentView {
+  /// Settings, like Hue's last tab: devices, rooms and accounts. Set up once, then out of the way of the Room tab.
+  var settingsTab: some View {
+    NavigationStack {
+      List {
+        Section("Devices") {
+          ForEach(room.items) { item in
+            Button { open(item) } label: {
+              HStack(spacing: 12) {
+                Orb(item: item, size: 36)
+                VStack(alignment: .leading, spacing: 2) {
+                  Text(item.name).foregroundStyle(Ink.text)
+                  Text(room.roomOf(item)).font(.footnote).foregroundStyle(Ink.dim)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
+              }
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+              Button(role: .destructive) { removing = item } label: { Label("Remove", systemImage: "trash") }
+            }
+          }
+          Button { sheet = .add } label: { Label("Add a device", systemImage: "plus") }
+        }
+        .listRowBackground(Ink.card)
+        Section("Rooms") {
+          ForEach(room.rooms, id: \.self) { name in
+            Button {
+              roomName = name
+              roomEdit = .rename(name)
+            } label: {
+              LabeledContent(name) {
+                Text("\(room.items.filter { room.roomOf($0) == name }.count)").foregroundStyle(Ink.dim)
+              }
+              .foregroundStyle(Ink.text)
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+              if room.rooms.count > 1 {
+                Button(role: .destructive) { deletingRoom = name } label: { Label("Delete", systemImage: "trash") }
+              }
+            }
+          }
+          Button {
+            roomName = ""
+            roomEdit = .add
+          } label: { Label("Add a room", systemImage: "plus") }
+        }
+        .listRowBackground(Ink.card)
+        Section("Hubspace") {
+          if room.hubspace.state == .ready {
+            Button("Sign out", role: .destructive) { room.hubspace.signOut() }
+          } else {
+            Button("Sign in") { sheet = .hubSetup }
+          }
+        }
+        .listRowBackground(Ink.card)
+        Section {
+          Toggle("Reduce flashing", isOn: Binding(get: { room.reduceFlashing }, set: { room.reduceFlashing = $0 }))
+        } footer: {
+          Text("Hides blink, flash and strobe effects and calms music mode.")
+        }
+        .listRowBackground(Ink.card)
+        Section("Help") {
+          Button { sheet = .log } label: { Label("Activity log", systemImage: "doc.text") }
+          LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
+        }
+        .listRowBackground(Ink.card)
+      }
+      .scrollContentBackground(.hidden)
+      .background(RoomGlow(room: room))
+      .foregroundStyle(Ink.text)
+      .navigationTitle("Settings")
+    }
+  }
+}
+
 // MARK: - Home pieces
 
 private struct SectionTitle: View {
@@ -662,8 +704,9 @@ private struct PowerButton: View {
   var body: some View {
     Button(action: action) {
       Image(systemName: "power")
-        .font(.system(size: 20, weight: .semibold))
-        .frame(width: 52, height: 52)
+        .contentShape(Rectangle())
+        .font(.system(size: 15, weight: .semibold))
+        .frame(width: 34, height: 34)
         .foregroundStyle(on ? .black : Ink.text)
         .background(Circle().fill(on ? Ink.text : Ink.raised))
         .animation(Motion.state, value: on)
@@ -1916,19 +1959,21 @@ private struct AutomationsTab: View {
   var room: Room
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 32) {
-        PageTitle("Automations", "On their own")
-        WalkInSection(room: room)
-        Rectangle().fill(Ink.line).frame(height: 1)
-        ScheduleSection()
+    NavigationStack {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 32) {
+          WalkInSection(room: room)
+          Rectangle().fill(Ink.line).frame(height: 1)
+          ScheduleSection()
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
       }
-      .padding(.horizontal, 20)
-      .padding(.vertical, 16)
+      .scrollIndicators(.hidden)
+      .background(RoomGlow(room: room))
+      .foregroundStyle(Ink.text)
+      .navigationTitle("Automations")
     }
-    .scrollIndicators(.hidden)
-    .background(RoomGlow(room: room))
-    .foregroundStyle(Ink.text)
   }
 }
 
@@ -2188,47 +2233,46 @@ private struct MapScreen: View {
     let lights = room.inRoom.filter { $0.caps.contains(.power) }
     let placed = lights.filter { room.placements[$0.id] != nil }
     let unplaced = lights.filter { room.placements[$0.id] == nil }
-    ScrollView {
-      VStack(alignment: .leading, spacing: 28) {
-        header
-        if lights.isEmpty {
-          Text("No lights in \(room.currentRoom) yet. Add one on the Room tab.")
-            .foregroundStyle(Ink.dim)
-        } else {
-          map(placed)
-          if !unplaced.isEmpty { tray(unplaced) }
-          sweepSection(lights)
-          syncSection(lights)
+    NavigationStack {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 28) {
+          header
+          if lights.isEmpty {
+            Text("No lights in \(room.currentRoom) yet. Add one on the Room tab.")
+              .foregroundStyle(Ink.dim)
+          } else {
+            map(placed)
+            if !unplaced.isEmpty { tray(unplaced) }
+            sweepSection(lights)
+            syncSection(lights)
+          }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+      }
+      .scrollIndicators(.hidden)
+      .background(RoomGlow(room: room))
+      .foregroundStyle(Ink.text)
+      .navigationTitle("Map")
+      .toolbar {
+        if room.rooms.count > 1 {
+          ToolbarItem(placement: .topBarTrailing) {
+            Menu {
+              Picker("Room", selection: Binding(get: { room.currentRoom }, set: { room.selectedRoom = $0 })) {
+                ForEach(room.rooms, id: \.self) { Text($0).tag($0) }
+              }
+            } label: {
+              Label(room.currentRoom, systemImage: "chevron.up.chevron.down").labelStyle(.titleAndIcon).font(.subheadline.weight(.semibold))
+            }
+          }
         }
       }
-      .padding(.horizontal, 20)
-      .padding(.vertical, 16)
+      .sheet(isPresented: $scanning) { ScanSheet(room: room).panel() }
     }
-    .scrollIndicators(.hidden)
-    .background(RoomGlow(room: room))
-    .foregroundStyle(Ink.text)
-    .sheet(isPresented: $scanning) { ScanSheet(room: room).panel() }
   }
 
   private var header: some View {
     VStack(alignment: .leading, spacing: 16) {
-      HStack(alignment: .bottom) {
-        PageTitle("Map", room.currentRoom)
-        Spacer()
-        if room.rooms.count > 1 {
-          Menu {
-            ForEach(room.rooms, id: \.self) { name in
-              Button(name) { room.selectedRoom = name }
-            }
-          } label: {
-            Label("Room", systemImage: "chevron.up.chevron.down")
-              .font(.subheadline.weight(.semibold))
-              .padding(.horizontal, 14)
-              .frame(minHeight: 44)
-              .background(Capsule().fill(Ink.raised))
-          }
-        }
-      }
       Text("Tap a light to make it blink. Drag lights to where they are, and the white dot to where you usually sit.")
         .font(.subheadline)
         .foregroundStyle(Ink.dim)
