@@ -92,6 +92,8 @@ struct ContentView: View {
       .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
     }
     .listStyle(.plain)
+    // Pull down to reconnect anything that dropped and re-read the bulbs.
+    .refreshable { await room.reconnect() }
     .scrollContentBackground(.hidden)
     .scrollIndicators(.hidden)
     .background(glow)
@@ -251,30 +253,38 @@ struct ContentView: View {
   private var scenes: some View {
     VStack(alignment: .leading, spacing: 12) {
       SectionTitle("Scenes")
-      ScrollView(.horizontal) {
-        HStack(spacing: 16) {
-          ForEach(Mood.all) { mood in
-            Button { room.apply(mood) } label: {
-              VStack(spacing: 8) {
-                Circle()
-                  .fill(AngularGradient(colors: mood.swatch + [mood.swatch[0]], center: .center))
-                  .frame(width: 60, height: 60)
-                  .padding(4)
-                  .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
-                Text(mood.id)
-                  .font(.caption.weight(.medium))
-                  .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
+      ForEach(Mood.Group.allCases, id: \.self) { group in
+        Text(group.rawValue).font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
+        ScrollView(.horizontal) {
+          HStack(alignment: .top, spacing: 16) {
+            ForEach(Mood.all.filter { $0.group == group }) { mood in
+              Button { room.apply(mood) } label: {
+                VStack(spacing: 8) {
+                  Circle()
+                    .fill(AngularGradient(colors: mood.swatch + [mood.swatch[0]], center: .center))
+                    .frame(width: 60, height: 60)
+                    .padding(4)
+                    .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
+                  Text(mood.id)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .frame(width: 72)
+                }
               }
+              .buttonStyle(Press())
+              .accessibilityLabel("\(mood.id) scene")
+              .accessibilityAddTraits(room.mood == mood.id ? .isSelected : [])
             }
-            .buttonStyle(Press())
           }
         }
+        .scrollIndicators(.hidden)
       }
-      .scrollIndicators(.hidden)
-      .disabled(room.roomReady.isEmpty)
-      .opacity(room.roomReady.isEmpty ? 0.4 : 1)
-      .sensoryFeedback(.selection, trigger: room.mood)
     }
+    .disabled(room.roomReady.isEmpty)
+    .opacity(room.roomReady.isEmpty ? 0.4 : 1)
+    .sensoryFeedback(.selection, trigger: room.mood)
   }
 
   private func row(_ item: LightItem) -> some View {
@@ -519,11 +529,13 @@ private struct LightSheet: View {
   @State private var newName = ""
   @Environment(\.dismiss) private var dismiss
 
+  // Fully saturated, one hue step apart, so each reads as its own color on an LED instead of drifting to white.
   private static let swatches: [RGB] = [
-    RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 0, b: 200), RGB(r: 130, g: 0, b: 255), RGB(r: 0, g: 40, b: 255),
-    RGB(r: 0, g: 230, b: 255), RGB(r: 60, g: 255, b: 60), RGB(r: 255, g: 240, b: 0), RGB(r: 255, g: 100, b: 20),
+    RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 90, b: 0), RGB(r: 255, g: 160, b: 0), RGB(r: 255, g: 230, b: 0),
+    RGB(r: 157, g: 255, b: 0), RGB(r: 0, g: 255, b: 64), RGB(r: 0, g: 255, b: 192), RGB(r: 0, g: 217, b: 255),
+    RGB(r: 0, g: 40, b: 255), RGB(r: 122, g: 0, b: 255), RGB(r: 255, g: 0, b: 225), RGB(r: 255, g: 45, b: 120),
   ]
-  private static let swatchNames = ["Red", "Pink", "Purple", "Blue", "Cyan", "Green", "Yellow", "Orange"]
+  private static let swatchNames = ["Red", "Orange", "Amber", "Yellow", "Lime", "Green", "Teal", "Cyan", "Blue", "Violet", "Magenta", "Pink"]
   private static let temperatures = [2200, 2700, 4000, 5000, 6500]
 
   var body: some View {
@@ -679,7 +691,28 @@ private struct LightSheet: View {
           .accessibilityLabel(Self.swatchNames[i])
         }
       }
-      ColorWheel(selected: item.kelvin == nil ? item.color : nil) { room.setColor(id, $0) }
+      if !room.recentColors.isEmpty {
+        Label("Recent", systemImage: "clock")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(Ink.dim)
+        ScrollView(.horizontal) {
+          HStack(spacing: 12) {
+            ForEach(Array(room.recentColors.enumerated()), id: \.offset) { _, c in
+              Button { room.setColor(id, c) } label: {
+                Circle()
+                  .fill(c.color)
+                  .frame(width: 44, height: 44)
+                  .padding(4)
+                  .overlay(Circle().strokeBorder(Ink.text, lineWidth: item.kelvin == nil && item.color == c ? 2 : 0))
+              }
+              .buttonStyle(Press())
+              .accessibilityLabel("Recent color")
+            }
+          }
+        }
+        .scrollIndicators(.hidden)
+      }
+      ColorWheel(selected: item.kelvin == nil ? item.color : nil, pick: { room.setColor(id, $0) }, done: { room.remember($0) })
         .padding(.horizontal, 24)
     }
   }
@@ -904,6 +937,8 @@ private struct MatchSheet: View {
 private struct ColorWheel: View {
   let selected: RGB?
   let pick: (RGB) -> Void
+  /// The color where the finger lifted, for the Recent row.
+  var done: (RGB) -> Void = { _ in }
 
   var body: some View {
     GeometryReader { geo in
@@ -924,14 +959,17 @@ private struct ColorWheel: View {
       .frame(width: r * 2, height: r * 2)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .contentShape(Circle())
-      .gesture(DragGesture(minimumDistance: 0).onChanged { g in
-        let dx = g.location.x - geo.size.width / 2, dy = g.location.y - geo.size.height / 2
-        let angle = atan2(dy, dx)
-        pick(RGB.hue(angle / (2 * .pi), saturation: min(1, (dx * dx + dy * dy).squareRoot() / r)))
-      })
+      .gesture(DragGesture(minimumDistance: 0)
+        .onChanged { g in pick(color(at: g.location, in: geo.size, r: r)) }
+        .onEnded { g in done(color(at: g.location, in: geo.size, r: r)) })
     }
     .aspectRatio(1, contentMode: .fit)
     .accessibilityLabel("Color wheel")
+  }
+
+  private func color(at p: CGPoint, in size: CGSize, r: CGFloat) -> RGB {
+    let dx = p.x - size.width / 2, dy = p.y - size.height / 2
+    return RGB.hue(atan2(dy, dx) / (2 * .pi), saturation: min(1, (dx * dx + dy * dy).squareRoot() / r))
   }
 }
 
@@ -1170,6 +1208,22 @@ private struct HubSetup: View {
         case .unavailable(let message):
           Text("Couldn't reach Hubspace: \(message)").foregroundStyle(Ink.bad)
           primary("Try again", disabled: false) { await hubspace.load() }
+        case .ready:
+          // Signed in; a bulb tile sent you here because Hubspace can't reach that bulb.
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Get the bulb on Wi-Fi").font(.headline)
+            ForEach(Array(Self.wifiSteps.enumerated()), id: \.offset) { i, step in
+              HStack(alignment: .top, spacing: 12) {
+                Text("\(i + 1)").font(.subheadline.weight(.bold)).frame(width: 24, height: 24).background(Circle().fill(Ink.raised))
+                Text(step).font(.subheadline).foregroundStyle(Ink.dim).fixedSize(horizontal: false, vertical: true)
+              }
+            }
+          }
+          primary("Check again", disabled: false) {
+            hubspace.clearOffline()
+            await hubspace.refresh()
+            dismiss()
+          }
         default:
           if case .loginFailed(let message) = hubspace.state {
             Text(message).foregroundStyle(Ink.bad).font(.subheadline)
@@ -1187,8 +1241,18 @@ private struct HubSetup: View {
       }
       .padding(24)
     }
-    .onChange(of: hubspace.state) { _, new in if new == .ready { dismiss() } }
+    // Signing in finishes setup; the Wi-Fi help (opened while signed in) closes itself from "Check again".
+    .onChange(of: hubspace.state) { _, new in if new == .ready, hubspace.offline.isEmpty { dismiss() } }
   }
+
+  // docs/ARCHITECTURE.md, Hubspace bulbs: campus networks only admit registered devices, and the bulb needs 2.4 GHz.
+  private static let wifiSteps = [
+    "In the Hubspace app, open the bulb's settings and copy its Wi-Fi MAC address.",
+    "Register that address on your school's device network (at NC A&T: Aggie_Guest self-registration, signed in with AggiePride). Wait for \"Approved\".",
+    "Run Wi-Fi setup for the bulb in the Hubspace app and pick that network. It has to be 2.4 GHz.",
+    "No campus network? A spare phone's Personal Hotspot with Maximize Compatibility on works too.",
+    "Come back and tap Check again, or pull down on the home screen.",
+  ]
 
   private func field(_ label: String, @ViewBuilder _ input: () -> some View) -> some View {
     VStack(alignment: .leading, spacing: 8) {

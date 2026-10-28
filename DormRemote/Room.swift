@@ -34,6 +34,12 @@ struct RGB: Equatable, Codable {
   }
 
   var color: Color { Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255) }
+
+  /// Hue palettes are pastel for bulbs; on an RGB strip pastels wash toward white, so push the saturation.
+  var vivid: RGB {
+    let (h, s) = hueSaturation
+    return s < 0.05 ? self : .hue(h, saturation: min(1, s * 1.5 + 0.15))
+  }
 }
 
 struct LightItem: Identifiable {
@@ -69,19 +75,55 @@ struct LightItem: Identifiable {
 
 /// Room-wide presets, applied to every light at once.
 struct Mood: Identifiable {
-  enum Look { case color(RGB), white(Int), party }
+  /// `palette` spreads its colors over the room's lights, one each, like a Hue scene.
+  enum Look { case color(RGB), white(Int), party, palette([RGB]) }
+  enum Group: String, CaseIterable { case everyday = "Everyday", colorful = "Colorful", night = "Night" }
+
   let id: String
+  let group: Group
   let look: Look
   let brightness: Int
 
+  init(_ id: String, _ group: Group, _ look: Look, _ brightness: Int) {
+    self.id = id
+    self.group = group
+    self.look = look
+    self.brightness = brightness
+  }
+
+  private static func hex(_ values: UInt32...) -> Look {
+    .palette(values.map { RGB(r: Int($0 >> 16 & 0xFF), g: Int($0 >> 8 & 0xFF), b: Int($0 & 0xFF)) })
+  }
+
+  // Palettes and brightness come from the Philips Hue scene gallery (RGB values captured in
+  // gist.github.com/labmonkey/a641f6b339ed9a71bdced64b9af91ee8), dimmest scenes raised a little for strips.
   static let all: [Mood] = [
-    Mood(id: "Relax", look: .white(2700), brightness: 60),
-    Mood(id: "Focus", look: .white(5000), brightness: 100),
-    Mood(id: "Sunset", look: .color(RGB(r: 255, g: 90, b: 30)), brightness: 70),
-    Mood(id: "Ocean", look: .color(RGB(r: 0, g: 140, b: 255)), brightness: 70),
-    Mood(id: "Movie", look: .color(RGB(r: 40, g: 40, b: 255)), brightness: 15),
-    Mood(id: "Night", look: .color(RGB(r: 255, g: 20, b: 0)), brightness: 5),
-    Mood(id: "Party", look: .party, brightness: 100),
+    Mood("Relax", .everyday, .white(2700), 60),
+    Mood("Read", .everyday, .white(3500), 100),
+    Mood("Focus", .everyday, .white(5000), 100),
+    Mood("Energize", .everyday, .white(6500), 100),
+    Mood("Sunrise", .everyday, .color(RGB(r: 255, g: 120, b: 40)), 45),
+
+    Mood("Party", .colorful, .party, 100),
+    Mood("Tropical twilight", .colorful, hex(0xCD7DFF, 0xFFB782, 0xFFBBED), 70),
+    Mood("Savanna sunset", .colorful, hex(0xFF5E24, 0xFFCD5A, 0xFF8244, 0xFFA75A), 60),
+    Mood("Arctic aurora", .colorful, hex(0x6EFFB9, 0x4188FF, 0x6DFAFF, 0x3F53FF), 50),
+    Mood("Spring blossom", .colorful, hex(0xFF7FC0, 0xFF917D, 0xFFB3E7, 0xFFCCEB), 60),
+    Mood("Golden pond", .colorful, hex(0xFF9C23, 0xFFD349, 0xFFA32A, 0xFFCA41), 65),
+    Mood("Honolulu", .colorful, hex(0xFF404E, 0xFF874C, 0xFFCD5F, 0xFF9A36), 70),
+    Mood("Blue lagoon", .colorful, hex(0x3EF4FF, 0xFFB68D, 0xAAFFF6, 0xD7FFD8), 50),
+    Mood("Miami", .colorful, hex(0xFF5F8B, 0x7AAEFF, 0xFF9359, 0xFFA059), 75),
+    Mood("Tokyo", .colorful, hex(0xFF2B78, 0x5C08FF, 0x3D90FF, 0xFFA125, 0xA919FF), 60),
+    Mood("Vapor wave", .colorful, hex(0x5F6DFF, 0xFF58E9, 0xFFB029, 0x8D1BFF), 78),
+    Mood("Soho", .colorful, hex(0xFF719B, 0x5500FF, 0xFFA171, 0x871BFF, 0x67FFDB), 62),
+    Mood("Disturbia", .colorful, hex(0x32FFEA, 0xFF5FF6, 0xFF2B42, 0x8EECFF), 63),
+
+    Mood("Movie", .night, .color(RGB(r: 40, g: 40, b: 255)), 15),
+    Mood("Nebula", .night, hex(0x6C15FF, 0xB37FFF, 0xFFB5E6, 0x97A2FF), 25),
+    Mood("Galaxy", .night, hex(0xEF7DFF, 0xFF6FA9, 0xFF8674), 25),
+    Mood("Blood moon", .night, hex(0x483CFF, 0xFFAE93, 0x6173FF, 0xFFB9D2), 20),
+    Mood("Moonlight", .night, hex(0x3E68FF, 0x5887FF, 0x83A4FF), 20),
+    Mood("Night", .night, .color(RGB(r: 255, g: 20, b: 0)), 5),
   ]
 
   var swatch: [Color] {
@@ -89,6 +131,7 @@ struct Mood: Identifiable {
     case .color(let c): [c.color, c.color.opacity(0.5)]
     case .white(let k): [RGB.kelvin(k).color, RGB.kelvin(k + 1500).color]
     case .party: [.pink, .purple, .blue, .cyan]
+    case .palette(let colors): colors.map { $0.vivid.color }
     }
   }
 }
@@ -247,7 +290,8 @@ final class Room {
     switch hubspace.state {
     case .ready:
       list += hubspace.lights.map { l in
-        LightItem(id: "hub:" + l.id, name: names["hub:" + l.id] ?? l.name, kind: .bulb, status: .ready,
+        LightItem(id: "hub:" + l.id, name: names["hub:" + l.id] ?? l.name, kind: .bulb,
+                  status: hubspace.offline.contains(l.id) ? .offline("Not on Wi-Fi. Tap for help") : .ready,
                   on: l.on, brightness: l.brightness, color: RGB(r: l.r, g: l.g, b: l.b), kelvin: l.kelvin,
                   effect: l.effect, speed: l.speed)
       }
@@ -433,6 +477,31 @@ final class Room {
     return Color(red: sum.0 / n / 255, green: sum.1 / n / 255, blue: sum.2 / n / 255)
   }
 
+  /// Colors picked on the wheel, newest first, so a favorite is one tap away next time.
+  private(set) var recentColors: [RGB] = {
+    guard let data = UserDefaults.standard.data(forKey: "recentColors") else { return [] }
+    return (try? JSONDecoder().decode([RGB].self, from: data)) ?? []
+  }()
+
+  func remember(_ c: RGB) {
+    // Near-duplicates (a wheel drag ending a pixel away) replace the old entry.
+    recentColors.removeAll { abs($0.r - c.r) + abs($0.g - c.g) + abs($0.b - c.b) < 24 }
+    recentColors.insert(c, at: 0)
+    recentColors = Array(recentColors.prefix(8))
+    UserDefaults.standard.set(try? JSONEncoder().encode(recentColors), forKey: "recentColors")
+  }
+
+  /// Pull to refresh: reconnect anything that dropped and re-read the bulbs.
+  func reconnect() async {
+    strip.reconnectNow()
+    hubspace.clearOffline()
+    switch hubspace.state {
+    case .ready: await hubspace.refresh()
+    case .unavailable: await hubspace.load()
+    default: break
+    }
+  }
+
   func rename(_ id: String, to name: String) {
     let trimmed = name.trimmingCharacters(in: .whitespaces)
     names[id] = trimmed.isEmpty ? nil : trimmed
@@ -504,13 +573,20 @@ final class Room {
 
   func apply(_ m: Mood) {
     stopEffect(on: roomReady)
-    sweep(roomReady.filter { $0.kind != .remote }) { [weak self] light in
+    let lights = roomReady.filter { $0.kind != .remote }
+    // Palette colors go around the room in map order, so neighbors differ.
+    let angle = { (l: LightItem) in self.placements[l.id].map { atan2($0.y, $0.x) } ?? .infinity }
+    let order = Dictionary(uniqueKeysWithValues: lights.sorted { angle($0) < angle($1) }.enumerated().map { ($1.id, $0) })
+    sweep(lights) { [weak self] light in
       guard let self else { return }
       self.brightness(light, m.brightness)
       switch m.look {
       case .color(let c): self.paint(light, c)
       case .white(let k): self.white(light, k)
       case .party: self.paint(light, RGB(r: 255, g: 0, b: 180))
+      case .palette(let colors):
+        let c = colors[(order[light.id] ?? 0) % colors.count]
+        self.paint(light, light.kind == .strip ? c.vivid : c)
       }
     }
     if case .party = m.look { start(.pattern(10), on: Self.all) }

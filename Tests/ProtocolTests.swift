@@ -189,6 +189,19 @@ final class LookTests: XCTestCase {
     XCTAssertEqual(RGB.kelvin(2200), RGB(r: 255, g: 146, b: 39))
     XCTAssertEqual(RGB.kelvin(6500), RGB(r: 255, g: 254, b: 250))
   }
+
+  func testEveryShortcutSceneExists() {
+    for choice in SceneChoice.allCases { XCTAssertNotNil(choice.mood, choice.rawValue) }
+    XCTAssertEqual(Set(Mood.all.map(\.id)).count, Mood.all.count, "scene names must be unique")
+  }
+
+  func testVividKeepsHueAndWhite() {
+    // Hue's pastel peach becomes a saturated orange on the strip; white stays white.
+    let peach = RGB(r: 255, g: 183, b: 130).vivid
+    XCTAssertEqual(peach.r, 255)
+    XCTAssertLessThan(peach.b, 40)
+    XCTAssertEqual(RGB.white.vivid, .white)
+  }
 }
 
 final class BulbProtocolTests: XCTestCase {

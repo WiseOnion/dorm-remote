@@ -154,7 +154,27 @@ final class Strip: Identifiable {
   @ObservationIgnored fileprivate var retryTimer: Timer?
   @ObservationIgnored fileprivate var unlocking = false
 
-  init(id: UUID) { self.id = id }
+  // What the last connection learned, so the next one is quicker: discover only this service, and go straight to
+  // the unlock for a strip that needs it instead of waiting out the silent status request.
+  @ObservationIgnored fileprivate var service: CBUUID?
+  @ObservationIgnored fileprivate var needsUnlock = false
+
+  init(id: UUID) {
+    self.id = id
+    let hint = UserDefaults.standard.dictionary(forKey: Self.hintsKey)?[id.uuidString] as? [String: String] ?? [:]
+    service = hint["service"].map(CBUUID.init(string:))
+    needsUnlock = hint["unlock"] == "1"
+  }
+
+  fileprivate static let hintsKey = "stripHints"
+
+  fileprivate func saveHint() {
+    var all = UserDefaults.standard.dictionary(forKey: Self.hintsKey) ?? [:]
+    var hint: [String: String] = ["unlock": needsUnlock ? "1" : "0"]
+    if let service { hint["service"] = service.uuidString }
+    all[id.uuidString] = hint
+    UserDefaults.standard.set(all, forKey: Self.hintsKey)
+  }
 }
 
 /// Every DayBetter strip you've added. Saved strips reconnect on their own; scanning only fills the setup list.
@@ -236,6 +256,17 @@ final class StripController: NSObject {
     adding = nil
     stopTimers(strip)
     if let p = strip.peripheral { central.cancelPeripheralConnection(p) }
+  }
+
+  /// Pull to refresh: try every strip that isn't connected right now instead of waiting for its retry.
+  func reconnectNow() {
+    guard central.state == .poweredOn else { return }
+    for strip in strips where strip.state != .connected {
+      if case .connecting = strip.state { continue }
+      strip.retryTimer?.invalidate()
+      if let p = strip.peripheral { attach(strip, p) }
+    }
+    updateScan()
   }
 
   /// Forgets a strip.
@@ -363,18 +394,29 @@ final class StripController: NSObject {
   /// Asks for the strip's status. A strip that answers is ready; one that stays silent may be a newer controller
   /// waiting for the CCHIP unlock, so try that next. Some controllers answer neither and still take commands.
   private func handshake(_ strip: Strip) {
-    rawWrite(strip, Daybetter.frame(Daybetter.status, [0x00]))
     strip.handshakeTimer?.invalidate()
+    if strip.needsUnlock {
+      unlock(strip)
+      return
+    }
+    rawWrite(strip, Daybetter.frame(Daybetter.status, [0x00]))
     strip.handshakeTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self, weak strip] _ in
       guard let self, let strip, strip.state == .connecting else { return }
       self.note("no reply, trying the CCHIP unlock")
-      strip.unlocking = true
-      self.rawWrite(strip, Daybetter.frame(Daybetter.challenge, Daybetter.cchip))
-      strip.handshakeTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self, weak strip] _ in
-        guard let self, let strip, strip.state == .connecting else { return }
-        self.note("no unlock reply either, sending commands anyway")
-        self.ready(strip)
-      }
+      self.unlock(strip)
+    }
+  }
+
+  private func unlock(_ strip: Strip) {
+    strip.unlocking = true
+    rawWrite(strip, Daybetter.frame(Daybetter.challenge, Daybetter.cchip))
+    strip.handshakeTimer?.invalidate()
+    strip.handshakeTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self, weak strip] _ in
+      guard let self, let strip, strip.state == .connecting else { return }
+      self.note("no unlock reply, sending commands anyway")
+      strip.needsUnlock = false
+      strip.saveHint()
+      self.ready(strip)
     }
   }
 
@@ -393,6 +435,8 @@ final class StripController: NSObject {
       if strip.unlocking, let unlocked = Daybetter.unlockResult(bytes) {
         if unlocked {
           note("unlocked")
+          strip.needsUnlock = true
+          strip.saveHint()
           ready(strip)
         } else {
           fail(strip, "The strip refused the unlock. Unplug it for a few seconds, then try again.")
@@ -400,7 +444,10 @@ final class StripController: NSObject {
         return
       }
       // Any reply means it takes commands without the unlock.
-      if bytes.first == 0xA1 { ready(strip) }
+      if bytes.first == 0xA1, !strip.unlocking {
+        strip.saveHint()
+        ready(strip)
+      }
     }
     if let status = StripStatus(bytes) { onStatus?(strip.id, status) }
   }
@@ -490,9 +537,12 @@ extension StripController: CBCentralManagerDelegate {
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-    note("connected, discovering services")
-    lookup(peripheral.identifier)?.state = .connecting
-    peripheral.discoverServices(nil)
+    let strip = lookup(peripheral.identifier)
+    strip?.state = .connecting
+    // A known strip only needs its own service looked up, which is faster than listing them all.
+    let known = strip?.service.map { [$0] }
+    note(known == nil ? "connected, discovering services" : "connected, looking up \(known![0].uuidString)")
+    peripheral.discoverServices(known)
   }
 
   func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -537,6 +587,13 @@ extension StripController: CBPeripheralDelegate {
     let services = peripheral.services ?? []
     note("services: " + services.map(\.uuid.uuidString).joined(separator: ", "))
     let usable = services.filter { Daybetter.characteristics(for: $0.uuid) != nil }
+    // The remembered service is gone (controller swapped?): forget it and list everything.
+    if strip.service != nil, usable.isEmpty {
+      strip.service = nil
+      strip.saveHint()
+      peripheral.discoverServices(nil)
+      return
+    }
     guard let service = usable.first(where: { !Daybetter.isSegmentController($0.uuid) }) else {
       fail(strip, usable.isEmpty
         ? "No Daybetter service found. Open the log and share it."
@@ -544,6 +601,7 @@ extension StripController: CBPeripheralDelegate {
       return
     }
     note("using service \(service.uuid.uuidString)")
+    strip.service = service.uuid
     peripheral.discoverCharacteristics(nil, for: service)
   }
 
