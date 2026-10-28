@@ -260,14 +260,30 @@ struct ContentView: View {
 
   private var scenes: some View {
     VStack(alignment: .leading, spacing: 12) {
-      SectionTitle("Scenes")
+      HStack {
+        SectionTitle("Scenes")
+        Spacer()
+        Button { room.living.toggle() } label: {
+          Label("Living", systemImage: room.living ? "wind" : "pause.circle")
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 14)
+            .frame(minHeight: 36)
+            .foregroundStyle(room.living ? .black : Ink.text)
+            .background(Capsule().fill(room.living ? Ink.text : Ink.raised))
+        }
+        .buttonStyle(Press())
+        .frame(minHeight: 44)
+        .accessibilityLabel("Living scenes")
+        .accessibilityValue(room.living ? "On" : "Off")
+        .accessibilityHint("Color scenes drift slowly from light to light")
+      }
       let favorites = room.moods.filter { room.favorites.contains($0.id) }
       if !favorites.isEmpty { sceneRow("Favorites", favorites) }
       sceneRow(Mood.Group.mine.rawValue, room.customScenes, leading: AnyView(HStack(alignment: .top, spacing: 16) { saveTile; photoTile }))
       ForEach(Mood.Group.allCases.filter { $0 != .mine }, id: \.self) { group in
         sceneRow(group.rawValue, Mood.all.filter { $0.group == group })
       }
-      Text("Tap a color scene again to shuffle its colors. Press and hold to favorite.")
+      Text("Tap a color scene again to shuffle its colors. Press and hold to favorite. Living makes color scenes drift while the app is open.")
         .font(.footnote)
         .foregroundStyle(Ink.dim)
     }

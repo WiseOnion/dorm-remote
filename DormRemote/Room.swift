@@ -626,9 +626,7 @@ final class Room {
     shuffle = mood == m.id ? shuffle + 1 : 0
     stopEffect(on: roomReady)
     let lights = roomReady.filter { $0.kind != .remote }
-    // Palette colors go around the room in map order, so neighbors differ.
-    let angle = { (l: LightItem) in self.placements[l.id].map { atan2($0.y, $0.x) } ?? .infinity }
-    let order = Dictionary(uniqueKeysWithValues: lights.sorted { angle($0) < angle($1) }.enumerated().map { ($1.id, $0) })
+    let order = mapOrder(lights)
     let shift = shuffle
     sweep(lights) { [weak self] light in
       guard let self else { return }
@@ -645,17 +643,55 @@ final class Room {
       case .color(let c): self.paint(light, c)
       case .white(let k): self.white(light, k)
       case .party: self.paint(light, RGB(r: 255, g: 0, b: 180))
-      case .palette(let colors):
-        let c = colors[((order[light.id] ?? 0) + shift) % colors.count]
-        self.paint(light, light.kind == .strip ? c.vivid : c)
+      case .palette(let colors): self.paintPalette(light, colors, order, shift)
       case .snapshot: break
       }
     }
     if case .party = m.look { start(.pattern(10), on: Self.all) }
     mood = m.id
+    startLiving(m)
   }
 
   private var shuffle = 0
+
+  /// Palette colors go around the room in map order, so neighbors differ. Unplaced lights keep list order.
+  private func mapOrder(_ lights: [LightItem]) -> [String: Int] {
+    let angle = { (l: LightItem) in self.placements[l.id].map { atan2($0.y, $0.x) } ?? .infinity }
+    return Dictionary(uniqueKeysWithValues: lights.sorted { angle($0) < angle($1) }.enumerated().map { ($1.id, $0) })
+  }
+
+  private func paintPalette(_ light: LightItem, _ colors: [RGB], _ order: [String: Int], _ shift: Int) {
+    let c = colors[((order[light.id] ?? 0) + shift) % colors.count]
+    paint(light, light.kind == .strip ? c.vivid : c)
+  }
+
+  // MARK: Living scenes
+
+  /// Color scenes keep moving: every few seconds each light hands its color to the next, and strips fade
+  /// between them. Runs while the app is open; any manual change stops it.
+  var living = UserDefaults.standard.bool(forKey: "livingScenes") {
+    didSet {
+      UserDefaults.standard.set(living, forKey: "livingScenes")
+      if let id = mood, let m = moods.first(where: { $0.id == id }) { startLiving(m) } else { livingTimer?.invalidate() }
+    }
+  }
+  private var livingTimer: Timer?
+  static let livingStep = 12.0
+
+  private func startLiving(_ m: Mood) {
+    livingTimer?.invalidate()
+    guard living, case .palette(let colors) = m.look, colors.count > 1 else { return }
+    livingTimer = Timer.scheduledTimer(withTimeInterval: Self.livingStep, repeats: true) { [weak self] timer in
+      MainActor.assumeIsolated {
+        guard let self, self.mood == m.id, self.living else { return timer.invalidate() }
+        self.shuffle += 1
+        // Same order as when the scene was applied, so every light steps to its neighbor's color.
+        let lights = self.roomReady.filter { $0.kind != .remote }
+        let order = self.mapOrder(lights)
+        for light in lights where light.on { self.paintPalette(light, colors, order, self.shuffle) }
+      }
+    }
+  }
 
   // MARK: Your scenes
 
