@@ -55,6 +55,8 @@ struct ContentView: View {
   @State private var deletingRoom: String?
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var roomName = ""
+  @State private var savingScene = false
+  @State private var sceneName = ""
 
   private enum RoomEdit: Equatable { case add, rename(String) }
 
@@ -256,38 +258,93 @@ struct ContentView: View {
   private var scenes: some View {
     VStack(alignment: .leading, spacing: 12) {
       SectionTitle("Scenes")
-      ForEach(Mood.Group.allCases, id: \.self) { group in
-        Text(group.rawValue).font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
-        ScrollView(.horizontal) {
-          HStack(alignment: .top, spacing: 16) {
-            ForEach(Mood.all.filter { $0.group == group }) { mood in
-              Button { room.apply(mood) } label: {
-                VStack(spacing: 8) {
-                  Circle()
-                    .fill(AngularGradient(colors: mood.swatch + [mood.swatch[0]], center: .center))
-                    .frame(width: 60, height: 60)
-                    .padding(4)
-                    .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
-                  Text(mood.id)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
-                    .multilineTextAlignment(.center)
-                    .lineLimit(2)
-                    .frame(width: 72)
-                }
-              }
-              .buttonStyle(Press())
-              .accessibilityLabel("\(mood.id) scene")
-              .accessibilityAddTraits(room.mood == mood.id ? .isSelected : [])
-            }
-          }
-        }
-        .scrollIndicators(.hidden)
+      let favorites = room.moods.filter { room.favorites.contains($0.id) }
+      if !favorites.isEmpty { sceneRow("Favorites", favorites) }
+      sceneRow(Mood.Group.mine.rawValue, room.customScenes, leading: AnyView(saveTile))
+      ForEach(Mood.Group.allCases.filter { $0 != .mine }, id: \.self) { group in
+        sceneRow(group.rawValue, Mood.all.filter { $0.group == group })
       }
+      Text("Tap a color scene again to shuffle its colors. Press and hold to favorite.")
+        .font(.footnote)
+        .foregroundStyle(Ink.dim)
     }
     .disabled(room.roomReady.isEmpty)
     .opacity(room.roomReady.isEmpty ? 0.4 : 1)
     .sensoryFeedback(.selection, trigger: room.mood)
+    .alert("Save scene", isPresented: $savingScene) {
+      TextField("Name", text: $sceneName)
+      Button("Save") { room.saveScene(named: sceneName) }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("Saves every light in \(room.currentRoom) the way it is now.")
+    }
+  }
+
+  private func sceneRow(_ title: String, _ moods: [Mood], leading: AnyView? = nil) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text(title).font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
+      ScrollView(.horizontal) {
+        HStack(alignment: .top, spacing: 16) {
+          if let leading { leading }
+          ForEach(moods) { sceneTile($0) }
+        }
+      }
+      .scrollIndicators(.hidden)
+    }
+  }
+
+  private func sceneTile(_ mood: Mood) -> some View {
+    Button { room.apply(mood) } label: {
+      VStack(spacing: 8) {
+        Circle()
+          .fill(AngularGradient(colors: mood.swatch + [mood.swatch[0]], center: .center))
+          .frame(width: 60, height: 60)
+          .padding(4)
+          .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
+          .overlay(alignment: .topTrailing) {
+            if room.favorites.contains(mood.id) {
+              Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.yellow)
+                .padding(4).background(Circle().fill(Ink.bg))
+            }
+          }
+        Text(mood.id)
+          .font(.caption.weight(.medium))
+          .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
+          .multilineTextAlignment(.center)
+          .lineLimit(2)
+          .frame(width: 72)
+      }
+    }
+    .buttonStyle(Press())
+    .accessibilityLabel("\(mood.id) scene")
+    .accessibilityAddTraits(room.mood == mood.id ? .isSelected : [])
+    .contextMenu {
+      let favorite = room.favorites.contains(mood.id)
+      Button(favorite ? "Remove from Favorites" : "Add to Favorites", systemImage: favorite ? "star.slash" : "star") {
+        room.toggleFavorite(mood.id)
+      }
+      if mood.group == .mine {
+        Button("Delete scene", systemImage: "trash", role: .destructive) { room.deleteScene(mood.id) }
+      }
+    }
+  }
+
+  private var saveTile: some View {
+    Button {
+      sceneName = ""
+      savingScene = true
+    } label: {
+      VStack(spacing: 8) {
+        Image(systemName: "plus")
+          .font(.title3.weight(.semibold))
+          .frame(width: 60, height: 60)
+          .background(Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])))
+          .padding(4)
+        Text("Save current").font(.caption.weight(.medium)).foregroundStyle(Ink.dim).frame(width: 72)
+      }
+    }
+    .buttonStyle(Press())
+    .accessibilityLabel("Save the room as a scene")
   }
 
   private func row(_ item: LightItem) -> some View {

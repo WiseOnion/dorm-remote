@@ -195,6 +195,25 @@ final class LookTests: XCTestCase {
     XCTAssertEqual(Set(Mood.all.map(\.id)).count, Mood.all.count, "scene names must be unique")
   }
 
+  func testSavedSceneRoundTrips() throws {
+    let snap = Mood.Snap(color: RGB(r: 1, g: 2, b: 3), kelvin: nil, brightness: 40, on: true)
+    let scene = Mood("Study", .mine, .snapshot(["strip": snap]), 40)
+    let back = try JSONDecoder().decode(Mood.self, from: JSONEncoder().encode(scene))
+    XCTAssertEqual(back.id, "Study")
+    XCTAssertEqual(back.group, .mine)
+    guard case .snapshot(let snaps) = back.look else { return XCTFail("wrong look") }
+    XCTAssertEqual(snaps["strip"], snap)
+  }
+
+  func testPhotoPalette() {
+    // Mostly red, some blue, a little green (too little to count), plus gray and black that are skipped.
+    let pixels = Array(repeating: RGB(r: 230, g: 20, b: 30), count: 60) + Array(repeating: RGB(r: 20, g: 40, b: 220), count: 30)
+      + [RGB(r: 0, g: 200, b: 0)] + Array(repeating: RGB(r: 128, g: 128, b: 128), count: 40) + Array(repeating: RGB(r: 5, g: 5, b: 5), count: 40)
+    let palette = Mood.palette(from: pixels)
+    XCTAssertEqual(palette, [RGB(r: 230, g: 20, b: 30), RGB(r: 20, g: 40, b: 220)])
+    XCTAssertEqual(Mood.palette(from: Array(repeating: RGB(r: 128, g: 128, b: 128), count: 10)), [])
+  }
+
   func testVividKeepsHueAndWhite() {
     // Hue's pastel peach becomes a saturated orange on the strip; white stays white.
     let peach = RGB(r: 255, g: 183, b: 130).vivid

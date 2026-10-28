@@ -74,10 +74,15 @@ struct LightItem: Identifiable {
 }
 
 /// Room-wide presets, applied to every light at once.
-struct Mood: Identifiable {
+struct Mood: Identifiable, Codable {
+  /// One light's part of a saved scene.
+  struct Snap: Codable, Equatable { var color: RGB; var kelvin: Int?; var brightness: Int; var on: Bool }
   /// `palette` spreads its colors over the room's lights, one each, like a Hue scene.
-  enum Look { case color(RGB), white(Int), party, palette([RGB]) }
-  enum Group: String, CaseIterable { case everyday = "Everyday", colorful = "Colorful", night = "Night" }
+  /// `snapshot` puts each light back exactly as it was saved, keyed by light id.
+  enum Look: Codable { case color(RGB), white(Int), party, palette([RGB]), snapshot([String: Snap]) }
+  enum Group: String, CaseIterable, Codable {
+    case mine = "Yours", everyday = "Everyday", colorful = "Colorful", night = "Night", seasonal = "Seasonal"
+  }
 
   let id: String
   let group: Group
@@ -124,15 +129,42 @@ struct Mood: Identifiable {
     Mood("Blood moon", .night, hex(0x483CFF, 0xFFAE93, 0x6173FF, 0xFFB9D2), 20),
     Mood("Moonlight", .night, hex(0x3E68FF, 0x5887FF, 0x83A4FF), 20),
     Mood("Night", .night, .color(RGB(r: 255, g: 20, b: 0)), 5),
+
+    Mood("Halloween", .seasonal, hex(0xFF5A00, 0x7A00FF, 0x39FF14, 0xFF8C00), 70),
+    Mood("Aggie Pride", .seasonal, hex(0x004684, 0xFDB927), 85),
+    Mood("Christmas", .seasonal, hex(0xFF0000, 0x00C040, 0xFFD27A), 75),
+    Mood("Valentine's", .seasonal, hex(0xFF0040, 0xFF4FA0, 0xC0007A), 60),
   ]
 
   var swatch: [Color] {
     switch look {
-    case .color(let c): [c.color, c.color.opacity(0.5)]
-    case .white(let k): [RGB.kelvin(k).color, RGB.kelvin(k + 1500).color]
-    case .party: [.pink, .purple, .blue, .cyan]
-    case .palette(let colors): colors.map { $0.vivid.color }
+    case .color(let c): return [c.color, c.color.opacity(0.5)]
+    case .white(let k): return [RGB.kelvin(k).color, RGB.kelvin(k + 1500).color]
+    case .party: return [.pink, .purple, .blue, .cyan]
+    case .palette(let colors): return colors.map { $0.vivid.color }
+    case .snapshot(let snaps):
+      // Sorted by light id so the swatch doesn't reshuffle between redraws.
+      let lit = snaps.keys.sorted().compactMap { snaps[$0] }.filter(\.on).map { ($0.kelvin.map(RGB.kelvin) ?? $0.color).color }
+      return lit.isEmpty ? [.gray, .black] : lit
     }
+  }
+
+  /// Picks a few colors that stand out in a photo: drops dark and gray pixels, groups the rest by hue,
+  /// and averages the biggest groups. Returned brightest-group first.
+  static func palette(from pixels: [RGB], count: Int = 4) -> [RGB] {
+    var bins = [(n: Int, r: Int, g: Int, b: Int)](repeating: (0, 0, 0, 0), count: 18)
+    for p in pixels {
+      let (h, s) = p.hueSaturation
+      guard s > 0.3, max(p.r, p.g, p.b) > 60 else { continue }
+      let i = min(17, Int(h * 18))
+      bins[i] = (bins[i].n + 1, bins[i].r + p.r, bins[i].g + p.g, bins[i].b + p.b)
+    }
+    // Ignore groups too small to be a real part of the picture.
+    let floor = max(1, pixels.count / 50)
+    return bins.filter { $0.n >= floor }
+      .sorted { $0.n > $1.n }
+      .prefix(count)
+      .map { RGB(r: $0.r / $0.n, g: $0.g / $0.n, b: $0.b / $0.n) }
   }
 }
 
@@ -514,16 +546,18 @@ final class Room {
     if !on { stopEffect(on: targets(id)) }
     cancelSweep()
     mood = nil
-    for light in targets(id) {
-      switch light.kind {
-      case .strip:
-        guard let s = stripUUID(light) else { break }
-        strip.setPower(s, on)
-        updateLook(s) { $0.on = on }
-      case .bulb: hub(light).map { hubspace.setPower($0, on) }
-      case .bleBulb: lamp(light).map { lamps.setPower($0, on) }
-      case .remote: break
-      }
+    for light in targets(id) { power(light, on) }
+  }
+
+  private func power(_ light: LightItem, _ on: Bool) {
+    switch light.kind {
+    case .strip:
+      guard let s = stripUUID(light) else { break }
+      strip.setPower(s, on)
+      updateLook(s) { $0.on = on }
+    case .bulb: hub(light).map { hubspace.setPower($0, on) }
+    case .bleBulb: lamp(light).map { lamps.setPower($0, on) }
+    case .remote: break
     }
   }
 
@@ -572,25 +606,103 @@ final class Room {
   }
 
   func apply(_ m: Mood) {
+    // Tapping the scene that's already on reshuffles which light gets which color (Hue does the same).
+    shuffle = mood == m.id ? shuffle + 1 : 0
     stopEffect(on: roomReady)
     let lights = roomReady.filter { $0.kind != .remote }
     // Palette colors go around the room in map order, so neighbors differ.
     let angle = { (l: LightItem) in self.placements[l.id].map { atan2($0.y, $0.x) } ?? .infinity }
     let order = Dictionary(uniqueKeysWithValues: lights.sorted { angle($0) < angle($1) }.enumerated().map { ($1.id, $0) })
+    let shift = shuffle
     sweep(lights) { [weak self] light in
       guard let self else { return }
+      if case .snapshot(let snaps) = m.look {
+        // Lights added after the scene was saved stay as they are.
+        guard let snap = snaps[light.id] else { return }
+        guard snap.on else { return self.power(light, false) }
+        self.brightness(light, snap.brightness)
+        if let k = snap.kelvin { self.white(light, k) } else { self.paint(light, snap.color) }
+        return
+      }
       self.brightness(light, m.brightness)
       switch m.look {
       case .color(let c): self.paint(light, c)
       case .white(let k): self.white(light, k)
       case .party: self.paint(light, RGB(r: 255, g: 0, b: 180))
       case .palette(let colors):
-        let c = colors[(order[light.id] ?? 0) % colors.count]
+        let c = colors[((order[light.id] ?? 0) + shift) % colors.count]
         self.paint(light, light.kind == .strip ? c.vivid : c)
+      case .snapshot: break
       }
     }
     if case .party = m.look { start(.pattern(10), on: Self.all) }
     mood = m.id
+  }
+
+  private var shuffle = 0
+
+  // MARK: Your scenes
+
+  private(set) var customScenes: [Mood] = {
+    guard let data = UserDefaults.standard.data(forKey: "customScenes") else { return [] }
+    return (try? JSONDecoder().decode([Mood].self, from: data)) ?? []
+  }()
+  private(set) var favorites = Set(UserDefaults.standard.stringArray(forKey: "favoriteScenes") ?? [])
+
+  /// Yours first, then the built-in ones.
+  var moods: [Mood] { customScenes + Mood.all }
+
+  /// Saves every light in the room as it is right now.
+  func saveScene(named name: String) {
+    let lights = roomReady.filter { $0.kind != .remote }
+    guard !lights.isEmpty else { return }
+    let snaps = Dictionary(uniqueKeysWithValues: lights.map {
+      ($0.id, Mood.Snap(color: $0.color, kelvin: $0.kelvin, brightness: $0.brightness, on: $0.on))
+    })
+    let level = lights.filter(\.on).map(\.brightness).max() ?? 0
+    addScene(Mood(uniqueName(name), .mine, .snapshot(snaps), level))
+  }
+
+  /// Saves a palette (from a photo) as one of your scenes and plays it.
+  func savePalette(_ colors: [RGB], named name: String) {
+    guard !colors.isEmpty else { return }
+    let m = Mood(uniqueName(name), .mine, .palette(colors), 70)
+    addScene(m)
+    apply(m)
+  }
+
+  func deleteScene(_ id: String) {
+    customScenes.removeAll { $0.id == id }
+    favorites.remove(id)
+    saveScenes()
+  }
+
+  func toggleFavorite(_ id: String) {
+    if favorites.contains(id) { favorites.remove(id) } else { favorites.insert(id) }
+    saveScenes()
+  }
+
+  private func addScene(_ m: Mood) {
+    customScenes.insert(m, at: 0)
+    saveScenes()
+  }
+
+  /// "Movie" → "Movie 2" when the name is taken, so ids stay unique.
+  private func uniqueName(_ name: String) -> String {
+    let base = name.trimmingCharacters(in: .whitespaces).isEmpty ? "My scene" : name.trimmingCharacters(in: .whitespaces)
+    let taken = Set(moods.map(\.id))
+    var candidate = base
+    var n = 2
+    while taken.contains(candidate) {
+      candidate = "\(base) \(n)"
+      n += 1
+    }
+    return candidate
+  }
+
+  private func saveScenes() {
+    UserDefaults.standard.set(try? JSONEncoder().encode(customScenes), forKey: "customScenes")
+    UserDefaults.standard.set(Array(favorites), forKey: "favoriteScenes")
   }
 
   // MARK: Placement and sweeps

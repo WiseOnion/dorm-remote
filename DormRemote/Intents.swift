@@ -15,6 +15,7 @@ enum SceneChoice: String, AppEnum {
   case tropicalTwilight = "Tropical twilight", arcticAurora = "Arctic aurora", springBlossom = "Spring blossom"
   case goldenPond = "Golden pond", honolulu = "Honolulu", miami = "Miami", tokyo = "Tokyo", vaporWave = "Vapor wave"
   case soho = "Soho", disturbia = "Disturbia", nebula = "Nebula", galaxy = "Galaxy", bloodMoon = "Blood moon", moonlight = "Moonlight"
+  case halloween = "Halloween", aggiePride = "Aggie Pride", christmas = "Christmas", valentines = "Valentine's"
 
   // App Intents reads these at build time, so they have to be literals.
   static let typeDisplayRepresentation: TypeDisplayRepresentation = "Scene"
@@ -24,6 +25,7 @@ enum SceneChoice: String, AppEnum {
     .springBlossom: "Spring blossom", .goldenPond: "Golden pond", .honolulu: "Honolulu", .ocean: "Blue lagoon",
     .miami: "Miami", .tokyo: "Tokyo", .vaporWave: "Vapor wave", .soho: "Soho", .disturbia: "Disturbia",
     .movie: "Movie", .nebula: "Nebula", .galaxy: "Galaxy", .bloodMoon: "Blood moon", .moonlight: "Moonlight", .night: "Night",
+    .halloween: "Halloween", .aggiePride: "Aggie Pride", .christmas: "Christmas", .valentines: "Valentine's",
   ]
 
   var mood: Mood? {
