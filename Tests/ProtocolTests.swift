@@ -256,6 +256,17 @@ final class LookTests: XCTestCase {
     XCTAssertTrue(names.subtracting(Room.flashingGroups).contains("Fade"))
   }
 
+  func testColorNames() {
+    XCTAssertEqual(RGB(r: 255, g: 0, b: 0).name, "Red")
+    XCTAssertEqual(RGB(r: 255, g: 90, b: 0).name, "Orange")
+    XCTAssertEqual(RGB(r: 0, g: 217, b: 255).name, "Cyan")
+    XCTAssertEqual(RGB(r: 0, g: 40, b: 255).name, "Blue")
+    XCTAssertEqual(RGB(r: 122, g: 0, b: 255).name, "Violet")
+    XCTAssertEqual(RGB(r: 255, g: 45, b: 120).name, "Pink")
+    XCTAssertEqual(RGB(r: 255, g: 180, b: 210).name, "Soft pink")
+    XCTAssertEqual(RGB.white.name, "White")
+  }
+
   func testVividKeepsHueAndWhite() {
     // Hue's pastel peach becomes a saturated orange on the strip; white stays white.
     let peach = RGB(r: 255, g: 183, b: 130).vivid

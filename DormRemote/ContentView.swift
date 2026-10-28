@@ -89,6 +89,8 @@ struct ContentView: View {
   @State private var sceneName = ""
   @State private var photo: PhotosPickerItem?
   @State private var photoError = false
+  /// The scene group on show; nil opens on the first one (Favorites if you have some).
+  @SceneStorage("sceneGroup") private var sceneGroup: String?
   @Namespace private var tabs
 
   private enum RoomEdit: Equatable { case add, rename(String) }
@@ -350,22 +352,43 @@ struct ContentView: View {
           Label("Living", systemImage: room.living ? "wind" : "pause.circle")
             .font(.subheadline.weight(.semibold))
             .padding(.horizontal, 14)
-            .frame(minHeight: 36)
+            .frame(minHeight: 44)
             .foregroundStyle(room.living ? .black : Ink.text)
             .background(Capsule().fill(room.living ? Ink.text : Ink.raised))
         }
         .buttonStyle(Press())
-        .frame(minHeight: 44)
         .accessibilityLabel("Living scenes")
         .accessibilityValue(room.living ? "On" : "Off")
         .accessibilityHint("Color scenes drift slowly from light to light")
       }
-      let favorites = room.moods.filter { room.favorites.contains($0.id) }
-      if !favorites.isEmpty { sceneRow("Favorites", favorites) }
-      sceneRow(Mood.Group.mine.rawValue, room.customScenes, leading: AnyView(HStack(alignment: .top, spacing: 16) { saveTile; photoTile }))
-      ForEach(Mood.Group.allCases.filter { $0 != .mine }, id: \.self) { group in
-        sceneRow(group.rawValue, Mood.all.filter { $0.group == group })
+      // One row at a time, picked with chips: six stacked rows read as clutter (the "feature overload" reviewers
+      // hold against Govee's app). Opens on Favorites when there are some.
+      let groups = sceneGroups
+      let shown = groups.contains(sceneGroup ?? "") ? sceneGroup! : groups[0]
+      ScrollView(.horizontal) {
+        HStack(spacing: 8) {
+          ForEach(groups, id: \.self) { g in
+            Button {
+              withAnimation(.easeOut(duration: 0.2)) { sceneGroup = g }
+            } label: {
+              Text(g)
+                .font(.footnote.weight(.semibold))
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .foregroundStyle(shown == g ? Ink.text : Ink.dim)
+                .background(Capsule().fill(shown == g ? Ink.raised : .clear))
+                .overlay(Capsule().strokeBorder(shown == g ? Ink.line : .clear))
+            }
+            .buttonStyle(Press())
+            .accessibilityAddTraits(shown == g ? .isSelected : [])
+          }
+        }
       }
+      .scrollIndicators(.hidden)
+      .sensoryFeedback(.selection, trigger: shown)
+      sceneRow(moods(in: shown), leading: shown == Mood.Group.mine.rawValue ? AnyView(HStack(alignment: .top, spacing: 16) { saveTile; photoTile }) : nil)
+        .id(shown)
+        .transition(.opacity)
       Text("Tap a color scene again to shuffle its colors. Press and hold to favorite. Living makes color scenes drift while the app is open.")
         .font(.footnote)
         .foregroundStyle(Ink.dim)
@@ -382,17 +405,28 @@ struct ContentView: View {
     }
   }
 
-  private func sceneRow(_ title: String, _ moods: [Mood], leading: AnyView? = nil) -> some View {
-    VStack(alignment: .leading, spacing: 12) {
-      Text(title).font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
-      ScrollView(.horizontal) {
-        HStack(alignment: .top, spacing: 16) {
-          if let leading { leading }
-          ForEach(moods) { sceneTile($0) }
-        }
+  private static let favoritesGroup = "Favorites"
+
+  /// Favorites (when there are any), Yours, then the built-in groups.
+  private var sceneGroups: [String] {
+    let favorites = room.favorites.isEmpty ? [] : [Self.favoritesGroup]
+    return favorites + Mood.Group.allCases.map(\.rawValue)
+  }
+
+  private func moods(in group: String) -> [Mood] {
+    if group == Self.favoritesGroup { return room.moods.filter { room.favorites.contains($0.id) } }
+    if group == Mood.Group.mine.rawValue { return room.customScenes }
+    return Mood.all.filter { $0.group.rawValue == group }
+  }
+
+  private func sceneRow(_ moods: [Mood], leading: AnyView? = nil) -> some View {
+    ScrollView(.horizontal) {
+      HStack(alignment: .top, spacing: 16) {
+        if let leading { leading }
+        ForEach(moods) { sceneTile($0) }
       }
-      .scrollIndicators(.hidden)
     }
+    .scrollIndicators(.hidden)
   }
 
   private func sceneTile(_ mood: Mood) -> some View {
@@ -622,7 +656,9 @@ private struct LightRow: View {
       guard item.on else { return "Off" }
       if item.kind == .strip, let effect = room.effectPlaying(on: item.id) { return effect.name }
       if let effect = item.effect { return HubspaceClient.effectName(effect) }
-      return item.kelvin.map { "\($0)K white" } ?? "Color"
+      // "Purple · 60%": the color in words (no judging swatches) and the level at a glance.
+      let look = item.kelvin.map { $0 <= 3300 ? "Warm white" : $0 >= 5000 ? "Cool white" : "White" } ?? item.color.name
+      return "\(look) · \(item.brightness)%"
     case .setup: return item.kind == .remote ? "Needs the IR bridge" : "Tap to set up"
     case .busy(let s): return s + "…"
     case .offline(let s): return s
@@ -1198,6 +1234,7 @@ private struct ColorWheel: View {
     }
     .aspectRatio(1, contentMode: .fit)
     .accessibilityLabel("Color wheel")
+    .accessibilityValue(selected?.name ?? "No color picked")
   }
 
   private func color(at p: CGPoint, in size: CGSize, r: CGFloat) -> RGB {

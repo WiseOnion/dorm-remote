@@ -35,6 +35,18 @@ struct RGB: Equatable, Codable {
 
   var color: Color { Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255) }
 
+  /// A plain name for the color ("Orange", "Soft pink"), for tiles and VoiceOver, so nobody has to judge a swatch.
+  var name: String {
+    let (h, s) = hueSaturation
+    if s < 0.12 { return "White" }
+    let bands: [(Double, String)] = [
+      (0.03, "Red"), (0.09, "Orange"), (0.14, "Amber"), (0.19, "Yellow"), (0.27, "Lime"), (0.42, "Green"), (0.5, "Teal"),
+      (0.55, "Cyan"), (0.62, "Sky blue"), (0.7, "Blue"), (0.78, "Violet"), (0.86, "Purple"), (0.96, "Pink"), (1.01, "Red"),
+    ]
+    let base = bands.first { h < $0.0 }?.1 ?? "Red"
+    return s < 0.45 ? "Soft " + base.lowercased() : base
+  }
+
   /// Hue palettes are pastel for bulbs; on an RGB strip pastels wash toward white, so push the saturation.
   var vivid: RGB {
     let (h, s) = hueSaturation
