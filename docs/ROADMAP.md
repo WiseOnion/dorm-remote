@@ -21,14 +21,14 @@ Each item ships as its own commit and has to pass CI (full app build + unit test
 | Seasonal and themed scenes | Hue adds Halloween and fall scenes every year | Done: **Halloween, Aggie Pride, Christmas, Valentine's** |
 | No account, local control, privacy | Magic Home Pro reviewers object to signing in to a global server | Done: strips, Bluetooth bulbs and the IR bridge never touch the internet; only Hubspace needs its own cloud |
 
-Second pass (October 2026), and what changed:
+Second pass (October 2026), every source opened and checked, and what changed:
 
 | Finding | Evidence | Change |
 |---|---|---|
-| Too many options overwhelm people who want simple control | Govee's app "can feel overwhelming for users who just want basic on and off control" (Smart Home Explorer, best smart lighting 2026) | Scenes show one row at a time with group chips, opening on Favorites, instead of six stacked rows |
+| Cluttered screens put people off | Magic Home Pro reviewers ask for "a cleaner UI" (JustUseApp review summary); the Hue app "can feel cluttered next to Govee Home" (Smart Home Explorer, best smart lighting systems 2026, updated Aug 23 2026) | Scenes show one row at a time with group chips, opening on Favorites, instead of six stacked rows |
 | Color names are hard to judge, especially for colorblind users | Assistants use fixed color vocabularies (Tom's Guide, Alexa's 133 colors); demand for apps that speak colors (Color Voice, App Store) | Tiles say "Purple · 60%" or "Warm white · 40%"; the color wheel speaks its color to VoiceOver |
-| Students struggle with too-bright minimums and with not knowing how the system works | Satisfaction study of smart lighting in student housing (Journal of Construction Business and Management, 2026) | Already covered: brightness goes to 1%, Night scene at 5% red, setup tips, Schedules & automations recipes |
-| Siri needs manual shortcut setup in other apps | Govee: "Siri control requires manual shortcut setup" (Smart Home Explorer, 2026) | Already covered: App Shortcuts work with Siri with no setup |
+| Students struggle with the minimum light level and with not knowing how the system works | Anugwo, Appau, Attakora-Amaniampong, Simpeh, "Smart, but Not Spontaneous?", Journal of Construction Business and Management 8(S1), 2026: dissatisfaction "associated with adjusting to the minimum light intensity"; "students' lack of knowledge impacts their satisfaction" | Already covered: brightness goes to 1%, Night scene at 5% red, setup tips, Schedules & automations recipes |
+| Siri and Shortcuts are missing or need setup in other apps | DayBetter App Store review: "No Siri or iOS Shortcuts support for quick on/off" | Already covered: App Shortcuts work with Siri with no setup |
 
 Left out on purpose:
 - **Home-screen widgets and Control Center buttons inside the app** need an app extension and an App Group, fragile on a free Apple ID, and the widget couldn't use the app's Bluetooth links. Shortcuts covers the same uses.
