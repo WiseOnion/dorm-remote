@@ -83,6 +83,7 @@ struct ContentView: View {
   @State private var removing: LightItem?
   @State private var deletingRoom: String?
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.scenePhase) private var scenePhase
   @State private var roomName = ""
   @State private var savingScene = false
   @State private var sceneName = ""
@@ -149,6 +150,9 @@ struct ContentView: View {
     .listStyle(.plain)
     // Pull down to reconnect anything that dropped and re-read the bulbs.
     .refreshable { await room.reconnect() }
+    .onChange(of: scenePhase, initial: true) { _, phase in
+      if phase == .active { room.walkIn.appOpenedAt = Date() }
+    }
     .scrollContentBackground(.hidden)
     .scrollIndicators(.hidden)
     .background(glow)

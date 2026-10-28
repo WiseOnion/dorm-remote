@@ -50,9 +50,14 @@ final class WalkIn {
     awaySince = Date()
   }
 
+  /// When you last opened the app. Opening it reconnects the strips too, and that isn't walking in: without this,
+  /// opening the app hours after getting home (if iOS didn't wake it on the way in) would turn the lights on.
+  var appOpenedAt: Date?
+
   func stripConnected(_ id: UUID) {
     guard let since = awaySince else { return }
     awaySince = nil
+    if let opened = appOpenedAt, Date().timeIntervalSince(opened) < 30 { return }
     // A blip (strip unplugged a moment, or you stepped out briefly) isn't coming home.
     guard enabled, Date().timeIntervalSince(since) >= Self.away else { return }
     if let spot { waitForSpot(id, spot, until: Date().addingTimeInterval(Self.spotWait)) } else { arrive(id) }
