@@ -661,6 +661,8 @@ private struct PillSlider: View {
         value = min(range.upperBound, max(range.lowerBound, g.location.x / w))
       })
     }
+    // A light tick every 10 %, so you can feel the level without looking.
+    .sensoryFeedback(.selection, trigger: Int((value * 10).rounded()))
     .accessibilityElement()
     .accessibilityLabel(label)
     .accessibilityValue("\(Int(value * 100)) percent")
@@ -1032,10 +1034,14 @@ private struct LightSheet: View {
       }
       .padding(.horizontal, 14)
       .frame(maxWidth: .infinity, minHeight: 56)
-      .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(active ? Ink.text.opacity(0.14) : Ink.raised))
-      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Ink.text.opacity(active ? 0.9 : 0), lineWidth: 1.5))
+      // The running effect lights up in its own colors.
+      .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(active ? colors[0].opacity(0.18) : Ink.raised))
+      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(active ? colors[0].opacity(0.9) : Ink.line, lineWidth: active ? 1.5 : 1))
+      .shadow(color: active ? colors[0].opacity(0.35) : .clear, radius: 10)
+      .animation(.easeOut(duration: 0.2), value: active)
     }
     .buttonStyle(Press())
+    .sensoryFeedback(.selection, trigger: active)
     .accessibilityAddTraits(active ? .isSelected : [])
   }
 
