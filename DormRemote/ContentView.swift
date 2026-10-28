@@ -599,6 +599,7 @@ private struct LightRow: View {
   var room: Room
   let item: LightItem
   let open: () -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     VStack(spacing: 16) {
@@ -635,7 +636,8 @@ private struct LightRow: View {
           label: "Brightness"
         )
         .frame(height: 44)
-        .transition(.opacity.combined(with: .move(edge: .top)))
+        // Reduce Motion: fade only, no slide.
+        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
       }
     }
     .padding(16)
@@ -1855,6 +1857,9 @@ private struct RoomMapSheet: View {
                   .fill(light.glow.color)
                   .frame(width: 34, height: 34)
                   .overlay(Circle().strokeBorder(Ink.text, style: StrokeStyle(lineWidth: 2, dash: placed == nil ? [4] : [])))
+                  // Same look, a 44 pt grab area.
+                  .padding(5)
+                  .contentShape(Circle())
                 Text(light.name).font(.caption2).lineLimit(1).fixedSize()
               }
               .position(x: (x + 1) / 2 * side, y: (y + 1) / 2 * side)
@@ -1862,6 +1867,7 @@ private struct RoomMapSheet: View {
                 room.setPlacement(light.id, x: g.location.x / side * 2 - 1, y: g.location.y / side * 2 - 1)
               })
               .accessibilityLabel(light.name)
+              .accessibilityHint("Drag to where it sits in your room")
             }
           }
           .frame(width: side, height: side)
