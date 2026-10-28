@@ -860,7 +860,7 @@ private struct LightSheet: View {
       }
       heading("In sync", "link")
       effectCard("Rainbow in sync", colors: Effect.rainbow.map(\.color), active: room.effectPlaying(on: id) == .synced) { room.start(.synced, on: id) }
-      ForEach(Effect.patternGroups, id: \.0) { group in
+      ForEach(Effect.patternGroups.filter { !room.reduceFlashing || !Room.flashingGroups.contains($0.0) }, id: \.0) { group in
         heading(group.0, "sparkles")
         LazyVGrid(columns: Self.twoColumns, spacing: 12) {
           ForEach(group.1) { p in
@@ -885,6 +885,15 @@ private struct LightSheet: View {
       if let error = room.effectError {
         Text(error).font(.footnote).foregroundStyle(Ink.bad)
       }
+      Toggle(isOn: Binding(get: { room.reduceFlashing }, set: { room.reduceFlashing = $0 })) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Reduce flashing").font(.subheadline.weight(.semibold))
+          Text("Hides blink, flash and strobe effects, and keeps music mode and Party smooth.")
+            .font(.footnote)
+            .foregroundStyle(Ink.dim)
+        }
+      }
+      .frame(minHeight: 44)
     }
   }
 

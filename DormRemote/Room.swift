@@ -666,7 +666,8 @@ final class Room {
       case .snapshot: break
       }
     }
-    if case .party = m.look { start(.pattern(10), on: Self.all) }
+    // Party switches colors on the strip; with Reduce flashing it rolls a smooth rainbow instead.
+    if case .party = m.look { start(reduceFlashing ? .synced : .pattern(10), on: Self.all) }
     mood = m.id
     startLiving(m)
   }
@@ -1127,14 +1128,25 @@ final class Room {
     guard effect == .phoneMic else { return }
     let db = 20 * log10(max(rms, 1e-6))
     let loud = max(0, min(1, (db + 55) / 45))
-    level = max(loud, level * 0.8)
+    // Reduce flashing: brightness falls slowly and never below 40 %, and colors fade at most every 1.5 s.
+    let gentle = reduceFlashing
+    level = max(loud, level * (gentle ? 0.96 : 0.8))
     average = average * 0.95 + loud * 0.05
-    if loud > average + 0.15, loud > 0.3, Date().timeIntervalSince(lastBeat) > 0.25 {
+    if loud > average + 0.15, loud > 0.3, Date().timeIntervalSince(lastBeat) > (gentle ? 1.5 : 0.25) {
       lastBeat = Date()
       hue += 0.13
       let c = RGB.hue(hue)
-      for s in effectStrips { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
+      for s in effectStrips { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: gentle) }
     }
-    for s in effectStrips { strip.setBrightness(s, Int(8 + level * 92)) }
+    let floor = gentle ? 40.0 : 8.0
+    for s in effectStrips { strip.setBrightness(s, Int(floor + level * (100 - floor))) }
   }
+
+  /// Hides blink, flash and strobe effects and calms music mode, for anyone sensitive to flashing light.
+  var reduceFlashing = UserDefaults.standard.bool(forKey: "reduceFlashing") {
+    didSet { UserDefaults.standard.set(reduceFlashing, forKey: "reduceFlashing") }
+  }
+
+  /// Effect groups that flash: blink, flash and strobe.
+  static let flashingGroups: Set<String> = ["Blink", "Flash", "Strobe"]
 }

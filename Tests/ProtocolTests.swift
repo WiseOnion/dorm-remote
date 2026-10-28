@@ -248,6 +248,14 @@ final class LookTests: XCTestCase {
     }
   }
 
+  @MainActor
+  func testReduceFlashingHidesRealGroups() {
+    let names = Set(Effect.patternGroups.map(\.0))
+    XCTAssertTrue(Room.flashingGroups.isSubset(of: names), "a hidden group name doesn't match: \(Room.flashingGroups)")
+    // Smooth effects stay available.
+    XCTAssertTrue(names.subtracting(Room.flashingGroups).contains("Fade"))
+  }
+
   func testVividKeepsHueAndWhite() {
     // Hue's pastel peach becomes a saturated orange on the strip; white stays white.
     let peach = RGB(r: 255, g: 183, b: 130).vivid
