@@ -38,8 +38,18 @@ On connect the app asks for status. A strip that answers is ready. A silent one 
 
 ## Use
 
+Three tabs:
+
+- **Room**: power, scenes, and every light. A running effect shows live in a **Now playing** bar (each light's current color, speed, Stop). **⋯** has Add, Reduce flashing, Turn everything off, Hubspace sign-out, and the log.
+- **Map**: where your lights are. **Find my lights with the camera**: tap the lights in the order you want, then aim the circle at each one as it blinks (it locks on by itself; without LiDAR it asks for a second aim from a step to the side). Tap a dot to make that light blink, drag dots and yourself into place. **How scenes travel** picks the sweep (around you, left to right, front to back, out from you, all at once). **Keep lights in sync**: Flash all together, then nudge any light that comes back late.
+- **Automations**: **Walk in** (lights up when you get back; optional location backup that works even after you swipe the app away, an activity log, and Try it now) and the Shortcuts schedule recipes.
+
+Also:
+
 - Fully close the DayBetter app first. A strip accepts one Bluetooth connection at a time.
-- **Add → DayBetter LED strip** for each strip. Strips you've added stay connected and reconnect by themselves.
-- Pull down on the home screen to reconnect anything that dropped.
-- **⋯ → Schedules & automations** has Shortcuts recipes: wake-up light, bedtime fade, Action Button, Control Center, Siri.
+- Pull down on the Room tab to reconnect anything that dropped.
 - If a strip won't connect, **⋯ → Show log** and share it.
+
+## Keeping the cloud bulb in step
+
+The Hubspace bulb takes commands through Home Depot's cloud, so it shows changes about a second after a strip would. The app measures Hubspace's round trip on every command and sends to the bulb that much earlier: room power, scenes, living scenes and Stop land together. A scene goes to the bulb as one command (power, brightness and color), and a tap goes out at once; only drags wait for a pause. In room effects the bulb runs its closest built-in effect, or gets a color every few seconds aimed ahead by its delay. If it still looks late, use **Map → Keep lights in sync**.
