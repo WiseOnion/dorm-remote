@@ -60,7 +60,15 @@ final class HubspaceClient: NSObject {
   private var otpAction: URL?
   private var loginSession: URLSession?
   private var pendingSends: [String: Task<Void, Never>] = [:]
+  /// When each kind of change last went out, so a tap goes at once and only a drag waits.
+  private var lastPut: [String: Date] = [:]
   private var poller: Task<Void, Never>?
+
+  /// Smoothed seconds for Hubspace to answer a command. The bulb changes about then, so this is how early to send to it.
+  private(set) var roundTrip = 0.8
+  /// Seconds from sending a command to seeing the bulb change: the round trip plus the cloud's hop to the bulb.
+  /// ponytail: the 0.4 s hop is a guess (Afero doesn't publish it); the map screen's sync nudge corrects it per bulb.
+  var expectedDelay: Double { roundTrip + 0.4 }
 
   override init() {
     super.init()
@@ -281,6 +289,25 @@ final class HubspaceClient: NSObject {
     ("Holidays", [("christmas", "Christmas"), ("july-4th", "July 4th"), ("valentines-day", "Valentine's Day")]),
   ]
 
+  /// What each built-in effect looks like, for its card and for the tiles while it runs.
+  static let effectColors: [String: [RGB]] = [
+    "rainbow": Effect.rainbow, "fade-3": Effect.three, "jump-3": Effect.three, "fade-7": Effect.rainbow, "jump-7": Effect.rainbow,
+    "flash": [.white, .black], "christmas": [.hex(0xFF0000), .hex(0x00C040), .white], "july-4th": [.hex(0xFF0000), .white, .hex(0x0040FF)],
+    "valentines-day": [.hex(0xFF4FA0), .hex(0xFF0000), .white], "chill": [.kelvin(2700), .kelvin(2200)], "sleep": [.kelvin(2200), .black],
+    "wake-up": [.kelvin(2200), .white], "moonlight": [.hex(0x6E8BFF), .hex(0x1A1F4A)], "nightlight": [.hex(0xFF5A1F), .black],
+    "dinner-party": [.kelvin(2700), .hex(0xFF9F1C)],
+  ]
+
+  static func colors(ofEffect id: String) -> [RGB] { effectColors[id] ?? [.white, .kelvin(5000)] }
+
+  /// Roughly what a built-in effect shows `t` seconds in, so the bulb's tile moves while it plays. Speed is -10…10.
+  /// ponytail: about 3 s per color at normal speed, eyeballed; the bulb's real timing isn't published.
+  static func preview(_ id: String, at t: Double, speed: Int) -> RGB {
+    let step = max(0.5, 3 - Double(speed) * 0.25)
+    let colors = colors(ofEffect: id)
+    return id.hasPrefix("jump") || id == "flash" ? colors[Int(t / step) % colors.count] : RGB.blend(colors, t / step)
+  }
+
   static func effectName(_ id: String) -> String {
     effectGroups.flatMap(\.1).first { $0.id == id }?.name ?? id.capitalized
   }
@@ -304,6 +331,26 @@ final class HubspaceClient: NSObject {
 
   private func inst(_ light: HubLight, _ cls: String) -> String? { light.instances[cls] ?? nil }
 
+  /// Power, brightness and color (or white) in one command, so a scene lands on the bulb in one step instead of two.
+  func setLook(_ light: HubLight, brightness: Int, color: RGB?, kelvin: Int?) {
+    update(light.id) {
+      $0.on = true
+      $0.brightness = brightness
+      $0.effect = nil
+      $0.kelvin = kelvin
+      if kelvin == nil, let color { $0.r = color.r; $0.g = color.g; $0.b = color.b }
+    }
+    // A brightness change still waiting would land after this and is already in it.
+    pendingSends.removeValue(forKey: light.id + "brightness")?.cancel()
+    var values: [(String, Any)] = [("power", "on"), ("brightness", brightness)]
+    if let kelvin {
+      values += [("color-mode", "white"), ("color-temperature", kelvin)]
+    } else if let c = color {
+      values += [("color-mode", "color"), ("color-rgb", ["color-rgb": ["r": c.r, "g": c.g, "b": c.b]])]
+    }
+    send(light, key: "color", values, delay: 0)
+  }
+
   func setColor(_ light: HubLight, r: Int, g: Int, b: Int) {
     update(light.id) { $0.r = r; $0.g = g; $0.b = b; $0.on = true; $0.kelvin = nil; $0.effect = nil }
     send(light, key: "color", [("power", "on"), ("color-mode", "color"), ("color-rgb", ["color-rgb": ["r": r, "g": g, "b": b]])])
@@ -319,21 +366,27 @@ final class HubspaceClient: NSObject {
     if let i = lights.firstIndex(where: { $0.id == id }) { change(&lights[i]) }
   }
 
-  /// The cloud is slow, so drags send once they pause. Each kind of change waits separately,
-  /// so a color change isn't dropped by a brightness change right after it.
+  /// A tap goes out at once. A drag sends its first change at once and then the latest one each time it pauses
+  /// (the cloud is slow, and every command costs rate limit). Each kind of change waits separately, so a color
+  /// change isn't dropped by a brightness change right after it.
   private func send(_ light: HubLight, key: String, _ values: [(String, Any)], delay: Int = 250) {
     send(light, key: key, entries: values.map { ($0.0, inst(light, $0.0), $0.1) }, delay: delay)
   }
 
   private func send(_ light: HubLight, key: String, entries: [(String, String?, Any)], delay: Int = 250) {
     let slot = light.id + key
+    let busy = pendingSends[slot] != nil || Date().timeIntervalSince(lastPut[slot] ?? .distantPast) < 0.3
     pendingSends[slot]?.cancel()
     let body = Self.stateBody(light.id, entries, now: Int(Date().timeIntervalSince1970 * 1000))
+    let wait = busy ? delay : 0
     pendingSends[slot] = Task {
-      if delay > 0 { try? await Task.sleep(for: .milliseconds(delay)) }
+      if wait > 0 { try? await Task.sleep(for: .milliseconds(wait)) }
       guard !Task.isCancelled, let accountID else { return }
+      lastPut[slot] = Date()
       do {
+        let sentAt = Date()
         _ = try await api("PUT", K.dataHost + "/v1/accounts/\(accountID)/metadevices/\(light.id)/state", json: body)
+        roundTrip = max(0.2, min(4, roundTrip * 0.7 + Date().timeIntervalSince(sentAt) * 0.3))
         commandError = nil
         offline.remove(light.id)
       } catch {

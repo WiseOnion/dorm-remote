@@ -25,6 +25,10 @@
 	<string>Needed to control your LED strip over Bluetooth.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>"Find my lights" watches your lights blink to learn where each one is. Nothing is recorded.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Walk in's location backup: iOS wakes Dorm Remote when you get near home, so your lights can welcome you even if you swiped the app away. Only a circle around home is watched.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Walk in saves where home is, so it can tell when you're back.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Music mode listens to the room so your lights pulse with the beat. Nothing is recorded.</string>
 

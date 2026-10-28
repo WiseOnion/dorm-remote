@@ -73,6 +73,8 @@ final class BulbBank: NSObject {
   private(set) var nearby: [FoundDevice] = []
   private(set) var scanning = false
   var log: [String] = []
+  /// Called on the main queue when a saved bulb is ready. Walk in uses it to light bulbs that connect late.
+  var onConnect: (() -> Void)?
 
   private var central: CBCentralManager!
   private var peripherals: [UUID: CBPeripheral] = [:]
@@ -130,6 +132,13 @@ final class BulbBank: NSObject {
   func setWhite(_ id: UUID, _ kelvin: Int) {
     update(id) { $0.kelvin = kelvin; $0.on = true }
     send(id) { $0.kind.white(kelvin, brightness: $0.brightness) }
+  }
+
+  /// One frame of an effect: just the color, nothing saved, no power command. The look from before stays saved.
+  func stream(_ id: UUID, _ c: RGB) {
+    guard let bulb = bulbs.first(where: { $0.id == id }), let p = peripherals[id], let w = writers[id] else { return }
+    let frames = bulb.kind == .elk ? [Data([0x7E, 0x00, 0x05, 0x03, UInt8(c.r), UInt8(c.g), UInt8(c.b), 0x0A, 0xEF])] : bulb.kind.color(c, brightness: 100)
+    for frame in frames { p.writeValue(frame, for: w, type: w.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse) }
   }
 
   private func update(_ id: UUID, _ change: (inout SavedBulb) -> Void) {
@@ -225,5 +234,6 @@ extension BulbBank: CBPeripheralDelegate {
     writers[peripheral.identifier] = w
     connected.insert(peripheral.identifier)
     note("connected \(peripheral.name ?? "bulb")")
+    onConnect?()
   }
 }

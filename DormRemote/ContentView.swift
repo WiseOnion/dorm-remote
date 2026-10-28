@@ -57,18 +57,14 @@ private struct Press: ButtonStyle {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log, automations, walkIn
+  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, log
   var id: String {
     switch self {
-    case .walkIn: "walkIn"
-    case .automations: "automations"
     case .light(let id): "light-" + id
     case .stripSetup: "strip"
     case .hubSetup: "hub"
     case .remote(let id): "remote-" + id
     case .addRemote: "addRemote"
-    case .scan: "scan"
-    case .map: "map"
     case .lampSetup: "lamps"
     case .add: "add"
     case .log: "log"
@@ -95,12 +91,27 @@ struct ContentView: View {
 
   private enum RoomEdit: Equatable { case add, rename(String) }
 
+  /// Three tabs, like Hue's app (Home, Automations…): what you use every day first, the room's layout, then what
+  /// runs by itself. Walk in, the map and schedules used to hide in the ⋯ menu.
   var body: some View {
+    TabView {
+      roomTab
+        .tabItem { Label("Room", systemImage: "lightbulb.2.fill") }
+      MapScreen(room: room)
+        .tabItem { Label("Map", systemImage: "map.fill") }
+      AutomationsTab(room: room)
+        .tabItem { Label("Automations", systemImage: "clock.arrow.2.circlepath") }
+    }
+    .tint(Ink.text)
+  }
+
+  private var roomTab: some View {
     // A List, so rows get the standard iOS swipe-left-to-delete.
     List {
       Group {
         header.padding(.top, 16)
         roomTabs
+        nowPlaying
         scenes.padding(.top, 8)
         HStack {
           SectionTitle("Lights")
@@ -150,6 +161,7 @@ struct ContentView: View {
       .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
     }
     .listStyle(.plain)
+    .animation(.easeOut(duration: 0.25), value: room.effect)
     // Pull down to reconnect anything that dropped and re-read the bulbs.
     .refreshable { await room.reconnect() }
     .onChange(of: scenePhase, initial: true) { _, phase in
@@ -168,8 +180,6 @@ struct ContentView: View {
         case .hubSetup: HubSetup(hubspace: room.hubspace)
         case .remote(let id): RemoteSheet(room: room, id: id)
         case .addRemote: AddRemoteSheet(room: room)
-        case .scan: ScanSheet(room: room) { self.sheet = nil; DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.sheet = .map } }
-        case .map: RoomMapSheet(room: room)
         case .lampSetup: LampSetup(lamps: room.lamps)
         case .add: AddSheet { kind in
           room.restore(kind)
@@ -184,8 +194,6 @@ struct ContentView: View {
           }
         }
         case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
-        case .automations: AutomationsSheet()
-        case .walkIn: WalkInSheet(room: room)
         }
       }
       .presentationDragIndicator(.visible)
@@ -305,10 +313,10 @@ struct ContentView: View {
       }
       Spacer()
       Menu {
-        Button("Walk in", systemImage: "figure.walk.arrival") { sheet = .walkIn }
-        Button("Schedules & automations", systemImage: "alarm") { sheet = .automations }
-        Button("Find my lights", systemImage: "viewfinder") { sheet = .scan }
-        Button("Room map", systemImage: "map") { sheet = .map }
+        Button("Add a light", systemImage: "plus") { sheet = .add }
+        Toggle(isOn: Binding(get: { room.reduceFlashing }, set: { room.reduceFlashing = $0 })) {
+          Label("Reduce flashing", systemImage: "eye.trianglebadge.exclamationmark")
+        }
         Button("Turn everything off", systemImage: "power") { room.setPower(Room.everything, false) }
         if room.hubspace.state == .ready {
           Button("Sign out of Hubspace", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { room.hubspace.signOut() }
@@ -333,6 +341,74 @@ struct ContentView: View {
         room.setPower(Room.all, !room.anyOn)
       }
       .disabled(room.roomReady.isEmpty)
+    }
+  }
+
+  /// The effect playing in this room, live: each light's current color, the speed, and Stop. Effects start in a light's
+  /// sheet, and without this the home screen didn't show one was running.
+  @ViewBuilder
+  private var nowPlaying: some View {
+    if let effect = room.effectPlaying(on: Room.all) {
+      let lights = room.roomReady.filter { room.effectLights.contains($0.id) }
+      VStack(alignment: .leading, spacing: 16) {
+        HStack(spacing: 12) {
+          ZStack {
+            ForEach(Array(lights.prefix(4).enumerated()), id: \.element.id) { i, light in
+              Circle()
+                .fill(room.shown(light).color)
+                .frame(width: 28, height: 28)
+                .overlay(Circle().strokeBorder(Ink.card, lineWidth: 2))
+                .offset(x: CGFloat(i) * 14)
+                .animation(.linear(duration: 0.12), value: room.shown(light))
+            }
+          }
+          .frame(width: 28 + CGFloat(max(0, min(4, lights.count) - 1)) * 14, height: 28, alignment: .leading)
+          .shadow(color: (lights.first.map { room.shown($0).color } ?? .white).opacity(0.6), radius: 10)
+          VStack(alignment: .leading, spacing: 2) {
+            Text("NOW PLAYING").font(.caption2.weight(.heavy)).tracking(1.5).foregroundStyle(Ink.dim)
+            Text(effect.name).font(.body.weight(.semibold)).lineLimit(1)
+          }
+          Spacer()
+          Button { sheet = .light(Room.all) } label: {
+            Image(systemName: "slider.horizontal.3")
+              .frame(width: 44, height: 44)
+              .background(Circle().fill(Ink.raised))
+          }
+          .buttonStyle(Press())
+          .accessibilityLabel("Change effect")
+          Button { room.endEffect() } label: {
+            Image(systemName: "stop.fill")
+              .frame(width: 44, height: 44)
+              .foregroundStyle(.black)
+              .background(Circle().fill(Ink.text))
+          }
+          .buttonStyle(Press())
+          .accessibilityLabel("Stop \(effect.name)")
+        }
+        if effect.hasSpeed {
+          HStack(spacing: 12) {
+            Image(systemName: "tortoise").foregroundStyle(Ink.dim)
+            PillSlider(value: Binding(get: { Double(room.speed - 1) / 99 }, set: { room.setSpeed(1 + Int(($0 * 99).rounded())) }),
+                       fill: AnyShapeStyle(LinearGradient(colors: effect.colors.map(\.color), startPoint: .leading, endPoint: .trailing)),
+                       label: "Speed", showsPercent: false)
+              .frame(height: 32)
+            Image(systemName: "hare").foregroundStyle(Ink.dim)
+          }
+        }
+        if effect == .phoneMic {
+          Capsule()
+            .fill(Ink.raised)
+            .overlay(alignment: .leading) {
+              GeometryReader { geo in Capsule().fill(.white).frame(width: geo.size.width * room.level) }
+            }
+            .frame(height: 6)
+            .animation(.linear(duration: 0.05), value: room.level)
+        }
+      }
+      .padding(16)
+      .card(tint: lights.first.map { room.shown($0).color })
+      .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+      .accessibilityElement(children: .contain)
     }
   }
 
@@ -573,17 +649,22 @@ private struct PowerButton: View {
 /// Glowing circle in the light's color, like the bulb icon in Hubspace's list.
 private struct Orb: View {
   let item: LightItem
+  /// What the light shows right now (an effect's current frame); its saved look otherwise.
+  var color: RGB?
   var size: CGFloat = 52
 
   var body: some View {
     let lit = item.status == .ready && item.on
+    let glow = (color ?? item.glow).color
     Image(systemName: icon)
       .font(.system(size: size * 0.4, weight: .medium))
       .frame(width: size, height: size)
       .foregroundStyle(lit ? .black.opacity(0.75) : Ink.dim)
-      .background(Circle().fill(lit ? item.glow.color : Ink.raised))
-      .shadow(color: lit ? item.glow.color.opacity(0.8) : .clear, radius: 14)
+      .background(Circle().fill(lit ? glow : Ink.raised))
+      .shadow(color: lit ? glow.opacity(0.8) : .clear, radius: 14)
       .animation(.easeOut(duration: 0.2), value: lit)
+      // Effect frames come ten times a second; a short blend keeps them smooth without lagging behind the light.
+      .animation(.linear(duration: 0.12), value: color)
   }
 
   private var icon: String {
@@ -602,9 +683,10 @@ private struct LightRow: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
+    let glow = room.shown(item).color
     VStack(spacing: 16) {
       HStack(spacing: 16) {
-        Orb(item: item)
+        Orb(item: item, color: room.live[item.id])
         VStack(alignment: .leading, spacing: 2) {
           Text(item.name).font(.body.weight(.semibold)).lineLimit(1)
           Text(status).font(.footnote).foregroundStyle(statusColor).lineLimit(1)
@@ -624,7 +706,7 @@ private struct LightRow: View {
         } else if item.status == .ready {
           Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(item.id, $0) }))
             .labelsHidden()
-            .tint(item.glow.color)
+            .tint(glow)
         } else {
           Image(systemName: "chevron.right").foregroundStyle(Ink.dim)
         }
@@ -632,7 +714,7 @@ private struct LightRow: View {
       if item.status == .ready, item.on {
         PillSlider(
           value: Binding(get: { Double(item.brightness) / 100 }, set: { room.setBrightness(item.id, Int(($0 * 100).rounded())) }),
-          fill: AnyShapeStyle(item.glow.color),
+          fill: AnyShapeStyle(glow),
           label: "Brightness"
         )
         .frame(height: 44)
@@ -641,7 +723,7 @@ private struct LightRow: View {
       }
     }
     .padding(16)
-    .card(tint: item.status == .ready && item.on && !item.caps.contains(.remote) ? item.glow.color : nil)
+    .card(tint: item.status == .ready && item.on && !item.caps.contains(.remote) ? glow : nil)
     .opacity(item.kind == .remote && item.status != .ready ? 0.55 : 1)
     .contentShape(RoundedRectangle(cornerRadius: 24))
     .onTapGesture(perform: open)
@@ -656,7 +738,7 @@ private struct LightRow: View {
     case .ready:
       if item.caps.contains(.remote) { return "Tap for the remote" }
       guard item.on else { return "Off" }
-      if item.kind == .strip, let effect = room.effectPlaying(on: item.id) { return effect.name }
+      if let effect = room.effectPlaying(on: item.id) { return effect.name }
       if let effect = item.effect { return HubspaceClient.effectName(effect) }
       // "Purple · 60%": the color in words (no judging swatches) and the level at a glance.
       let look = item.kelvin.map { $0 <= 3300 ? "Warm white" : $0 >= 5000 ? "Cool white" : "White" } ?? item.color.name
@@ -790,7 +872,7 @@ private struct LightSheet: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 28) {
           HStack(spacing: 16) {
-            Orb(item: item, size: 44)
+            Orb(item: item, color: isRoom ? nil : room.live[item.id], size: 44)
             Text(isRoom ? room.currentRoom : item.name)
               .font(.system(.title, design: .rounded, weight: .bold))
               .lineLimit(1)
@@ -837,7 +919,7 @@ private struct LightSheet: View {
         .padding(.top, 8)
       }
       .onAppear {
-        let inEffect = item.kind == .strip ? room.effectPlaying(on: id) != nil : item.effect != nil
+        let inEffect = room.effectPlaying(on: id) != nil || (!isRoom && item.effect != nil)
         mode = inEffect ? .effects : item.kelvin != nil ? .white : .color
       }
       .sheet(isPresented: $matching) {
@@ -986,8 +1068,26 @@ private struct LightSheet: View {
 
   private var stripEffects: some View {
     VStack(alignment: .leading, spacing: 20) {
-      if let playing = room.effectPlaying(on: id), playing != .phoneMic, playing != .candle, playing != .fire {
-        speedSlider(Double(room.speed - 1) / 99) { room.setSpeed(1 + Int(($0 * 99).rounded())) }
+      if let playing = room.effectPlaying(on: id) {
+        HStack(spacing: 12) {
+          VStack(alignment: .leading, spacing: 2) {
+            Text("Playing").font(.footnote).foregroundStyle(Ink.dim)
+            Text(playing.name).font(.headline)
+          }
+          Spacer()
+          Button { room.endEffect() } label: {
+            Label("Stop", systemImage: "stop.fill")
+              .font(.subheadline.weight(.semibold))
+              .padding(.horizontal, 16)
+              .frame(minHeight: 44)
+              .foregroundStyle(.black)
+              .background(Capsule().fill(Ink.text))
+          }
+          .buttonStyle(Press())
+        }
+        if playing.hasSpeed {
+          speedSlider(Double(room.speed - 1) / 99) { room.setSpeed(1 + Int(($0 * 99).rounded())) }
+        }
       }
       heading("Cozy", "flame")
       LazyVGrid(columns: Self.twoColumns, spacing: 12) {
@@ -1017,7 +1117,9 @@ private struct LightSheet: View {
           .frame(height: 6)
           .animation(.linear(duration: 0.05), value: room.level)
       }
-      Text("Built-in effects run on each strip and keep going when you close the app, but two strips drift apart over time. \"Rainbow in sync\" and music mode run from your phone, so they stay together while the app is open.")
+      Text(isRoom
+           ? "Built-in effects run on each strip and keep going when you close the app, but two strips drift apart over time. \"Rainbow in sync\", the flames and music run from your phone, so they stay together while the app is open. The smart bulb joins in too: its own matching effect, or a color every few seconds sent ahead by its cloud delay."
+           : "Built-in effects run on the strip and keep going when you close the app. \"Rainbow in sync\", the flames and music run from your phone while the app is open. Start an effect from Room controls to bring the other lights along.")
         .font(.footnote)
         .foregroundStyle(Ink.dim)
       if let error = room.effectError {
@@ -1035,15 +1137,6 @@ private struct LightSheet: View {
     }
   }
 
-  private static let bulbSwatches: [String: [Color]] = [
-    "rainbow": Effect.rainbow.map(\.color), "fade-3": Effect.three.map(\.color), "jump-3": Effect.three.map(\.color),
-    "fade-7": Effect.rainbow.map(\.color), "jump-7": Effect.rainbow.map(\.color), "flash": [.white, .black],
-    "christmas": [.red, .green, .white], "july-4th": [.red, .white, .blue], "valentines-day": [.pink, .red, .white],
-    "chill": [RGB.kelvin(2700).color, RGB.kelvin(2200).color], "sleep": [RGB.kelvin(2200).color, .black],
-    "wake-up": [RGB.kelvin(2200).color, .white], "moonlight": [Color(hex: 0x6E8BFF), Color(hex: 0x1A1F4A)],
-    "nightlight": [Color(hex: 0xFF5A1F), .black], "dinner-party": [RGB.kelvin(2700).color, Color(hex: 0xFF9F1C)],
-  ]
-
   private func bulbEffects(_ item: LightItem) -> some View {
     VStack(alignment: .leading, spacing: 20) {
       if item.effect != nil {
@@ -1053,7 +1146,7 @@ private struct LightSheet: View {
         heading(group.0, group.0 == "Holidays" ? "gift" : "sparkles")
         LazyVGrid(columns: Self.twoColumns, spacing: 12) {
           ForEach(group.1, id: \.id) { e in
-            effectCard(e.name, colors: Self.bulbSwatches[e.id] ?? [.white, RGB.kelvin(5000).color], active: item.effect == e.id) {
+            effectCard(e.name, colors: HubspaceClient.colors(ofEffect: e.id).map(\.color), active: item.effect == e.id) {
               room.setBulbEffect(id, e.id)
             }
           }
@@ -1580,17 +1673,16 @@ private struct HubSetup: View {
   }
 }
 
-/// Walk in settings: light up when you get home (WalkIn.swift).
-private struct WalkInSheet: View {
+/// Walk in settings: light up when you get home (WalkIn.swift). Lives on the Automations tab.
+private struct WalkInSection: View {
   var room: Room
 
   var body: some View {
     let walkIn = room.walkIn
-    ScrollView {
-      VStack(alignment: .leading, spacing: 24) {
+    VStack(alignment: .leading, spacing: 28) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Walk in").font(.system(.title, design: .rounded, weight: .bold))
-          Text("Your room lights up when you get back. Your strips are the sensor: when you've been gone 10 minutes and your phone comes back into a strip's Bluetooth range, the lights come on. No GPS, no extra hardware.")
+          Text("Walk in").font(.system(.title2, design: .rounded, weight: .bold))
+          Text("Your room lights up when you get back. Your strips are the sensor: once you've been gone a while and your phone comes back into a strip's Bluetooth range, the lights come on.")
             .foregroundStyle(Ink.dim)
         }
 
@@ -1599,72 +1691,156 @@ private struct WalkInSheet: View {
         }
         .frame(minHeight: 44)
 
-        HStack {
-          Text("What comes on")
-          Spacer()
-          Picker("What comes on", selection: Binding(get: { walkIn.sceneID }, set: { walkIn.sceneID = $0 })) {
-            Text("Lights as they were").tag(String?.none)
-            ForEach(room.moods) { Text($0.id).tag(Optional($0.id)) }
-          }
-          .pickerStyle(.menu)
-        }
-        .frame(minHeight: 44)
-        .disabled(!walkIn.enabled)
-
-        VStack(alignment: .leading, spacing: 12) {
-          Text("Your spot").font(.headline)
-          Text(walkIn.spot == nil
-               ? "Not set: the lights come on as soon as a strip is back in range, which is about your hallway. Stand right outside your door and tap Set my spot to make them wait until you're there."
-               : "Set: on the way back, the lights wait until you're about as close as where you stood.")
-            .font(.subheadline)
-            .foregroundStyle(Ink.dim)
-            .fixedSize(horizontal: false, vertical: true)
-          HStack(spacing: 12) {
-            Button {
-              walkIn.setSpot()
-            } label: {
-              HStack(spacing: 8) {
-                if walkIn.measuring { ProgressView().tint(.black) }
-                Text(walkIn.measuring ? "Measuring…" : walkIn.spot == nil ? "Set my spot" : "Set it again")
+        Group {
+          VStack(alignment: .leading, spacing: 12) {
+            HStack {
+              Text("What comes on")
+              Spacer()
+              Picker("What comes on", selection: Binding(get: { walkIn.sceneID }, set: { walkIn.sceneID = $0 })) {
+                Text("Lights as they were").tag(String?.none)
+                ForEach(room.moods) { Text($0.id).tag(Optional($0.id)) }
               }
+              .pickerStyle(.menu)
+            }
+            .frame(minHeight: 44)
+            VStack(alignment: .leading, spacing: 8) {
+              Text("Counts as coming home after being gone")
+              Picker("Away for at least", selection: Binding(get: { walkIn.awayMinutes }, set: { walkIn.awayMinutes = $0 })) {
+                ForEach(WalkIn.awayChoices, id: \.self) { Text("\($0) min").tag($0) }
+              }
+              .pickerStyle(.segmented)
+              Text("Shorter catches quick trips; longer ignores stepping out to the bathroom.")
+                .font(.footnote)
+                .foregroundStyle(Ink.dim)
+            }
+          }
+
+          spotSection(walkIn)
+          locationSection(walkIn)
+
+          Toggle(isOn: Binding(get: { walkIn.offWhenLeaving }, set: { walkIn.offWhenLeaving = $0 })) {
+            VStack(alignment: .leading, spacing: 2) {
+              Text("Turn off the smart bulb when I leave").font(.body.weight(.semibold))
+              Text("It's on Wi-Fi, so it can still be reached once you're gone. The strips can't: they're out of Bluetooth range by then.")
+                .font(.footnote)
+                .foregroundStyle(Ink.dim)
+            }
+          }
+          .frame(minHeight: 44)
+
+          Button { walkIn.tryNow() } label: {
+            Label("Try it now", systemImage: "play.fill")
               .font(.body.weight(.semibold))
               .frame(maxWidth: .infinity, minHeight: 52)
-              .foregroundStyle(.black)
-              .background(Capsule().fill(.white))
-            }
-            .buttonStyle(Press())
-            .disabled(walkIn.measuring)
-            if walkIn.spot != nil {
-              Button("Clear") { walkIn.clearSpot() }
-                .frame(minWidth: 64, minHeight: 52)
-            }
+              .background(Capsule().fill(Ink.raised))
           }
-          if let error = walkIn.spotError {
-            Text(error).font(.footnote).foregroundStyle(Ink.bad)
-          }
+          .buttonStyle(Press())
         }
         .disabled(!walkIn.enabled)
         .opacity(walkIn.enabled ? 1 : 0.5)
 
-        if let last = walkIn.lastArrival {
-          Label("Last welcome home: \(last.formatted(date: .abbreviated, time: .shortened))", systemImage: "house")
-            .font(.footnote)
-            .foregroundStyle(Ink.dim)
+        if !walkIn.events.isEmpty {
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Recent activity").font(.headline)
+            ForEach(walkIn.events) { event in
+              HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(event.time, format: .dateTime.weekday(.abbreviated).hour().minute())
+                  .font(.footnote.monospacedDigit())
+                  .foregroundStyle(Ink.dim)
+                  .frame(width: 92, alignment: .leading)
+                Text(event.text).font(.footnote).fixedSize(horizontal: false, vertical: true)
+              }
+            }
+          }
         }
 
-        Text("It follows your phone, so a roommate coming in won't trigger it. Keep Bluetooth on and leave Dorm Remote in the app switcher: swiping it away stops iOS from waking it until you open it again.")
+        Text("It follows your phone, so a roommate coming in won't trigger it. Keep Bluetooth on. Swiping Dorm Remote away stops iOS from waking it for Bluetooth; the location backup is the way around that.")
           .font(.footnote)
           .foregroundStyle(Ink.dim)
-      }
-      .padding(24)
     }
     .sensoryFeedback(.success, trigger: walkIn.spot)
+  }
+
+  private func spotSection(_ walkIn: WalkIn) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Your spot").font(.headline)
+      Text(walkIn.spot == nil
+           ? "Not set: the lights come on as soon as a strip is back in range, which is about your hallway. Stand right outside your door and tap Set my spot to make them wait until you're there."
+           : "Set: on the way back, the lights wait until you're about as close as where you stood.")
+        .font(.subheadline)
+        .foregroundStyle(Ink.dim)
+        .fixedSize(horizontal: false, vertical: true)
+      HStack(spacing: 12) {
+        Button { walkIn.setSpot() } label: {
+          HStack(spacing: 8) {
+            if walkIn.measuring { ProgressView().tint(.black) }
+            Text(walkIn.measuring ? "Measuring…" : walkIn.spot == nil ? "Set my spot" : "Set it again")
+          }
+          .font(.body.weight(.semibold))
+          .frame(maxWidth: .infinity, minHeight: 52)
+          .foregroundStyle(.black)
+          .background(Capsule().fill(.white))
+        }
+        .buttonStyle(Press())
+        .disabled(walkIn.measuring)
+        if walkIn.spot != nil {
+          Button("Clear") { walkIn.clearSpot() }
+            .frame(minWidth: 64, minHeight: 52)
+        }
+      }
+      if let error = walkIn.spotError {
+        Text(error).font(.footnote).foregroundStyle(Ink.bad)
+      }
+    }
+  }
+
+  private func locationSection(_ walkIn: WalkIn) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Toggle(isOn: Binding(get: { walkIn.useLocation }, set: { walkIn.useLocation = $0 })) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Location backup").font(.body.weight(.semibold))
+          Text("iOS wakes the app when you get near home, even if you swiped it away, so the strips are ready to catch you at the door. Your strips still decide when you're there.")
+            .font(.footnote)
+            .foregroundStyle(Ink.dim)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
+      .frame(minHeight: 44)
+      if walkIn.useLocation {
+        HStack(spacing: 12) {
+          Label(walkIn.home == nil ? "Home not set" : "Home is set", systemImage: walkIn.home == nil ? "mappin.slash" : "mappin.circle.fill")
+            .font(.subheadline)
+            .foregroundStyle(walkIn.home == nil ? Ink.bad : Ink.text)
+          Spacer()
+          Button {
+            walkIn.setHomeHere()
+          } label: {
+            HStack(spacing: 8) {
+              if walkIn.locating { ProgressView() }
+              Text(walkIn.home == nil ? "Set home here" : "Set again here")
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 16)
+            .frame(minHeight: 44)
+            .background(Capsule().fill(Ink.raised))
+          }
+          .buttonStyle(Press())
+          .disabled(walkIn.locating)
+        }
+        Text("Do this in your room. It watches a 150 m circle around it.")
+          .font(.footnote)
+          .foregroundStyle(Ink.dim)
+        if let error = walkIn.locationError {
+          Text(error).font(.footnote).foregroundStyle(Ink.bad).fixedSize(horizontal: false, vertical: true)
+        }
+      }
+    }
   }
 }
 
 /// Recipes for the Shortcuts actions in Intents.swift. iOS runs automations even with the app closed, which is
 /// how schedules work here: an app can't keep its own timers running in the background.
-private struct AutomationsSheet: View {
+private struct ScheduleSection: View {
   @Environment(\.openURL) private var openURL
 
   private static let recipes: [(icon: String, title: String, how: String)] = [
@@ -1677,10 +1853,9 @@ private struct AutomationsSheet: View {
   ]
 
   var body: some View {
-    ScrollView {
       VStack(alignment: .leading, spacing: 20) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Schedules & automations").font(.system(.title, design: .rounded, weight: .bold))
+          Text("Schedules").font(.system(.title2, design: .rounded, weight: .bold))
           Text("Set these up once in the Shortcuts app. They run on their own, even when Dorm Remote is closed.")
             .foregroundStyle(Ink.dim)
         }
@@ -1709,16 +1884,38 @@ private struct AutomationsSheet: View {
           .font(.footnote)
           .foregroundStyle(Ink.dim)
       }
-      .padding(24)
-    }
   }
 }
 
-/// "Find my lights": the lights blink one at a time while you turn slowly, and the app learns where each one is.
+/// The Automations tab: things that happen without you opening the app.
+private struct AutomationsTab: View {
+  var room: Room
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 32) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text("AUTOMATIONS").font(.caption2.weight(.heavy)).tracking(2.5).foregroundStyle(Ink.dim)
+          Text("On their own").font(.system(.largeTitle, design: .rounded, weight: .bold))
+        }
+        WalkInSection(room: room)
+        Rectangle().fill(Ink.line).frame(height: 1)
+        ScheduleSection()
+      }
+      .padding(.horizontal, 20)
+      .padding(.vertical, 16)
+    }
+    .scrollIndicators(.hidden)
+    .background(Ink.bg.ignoresSafeArea())
+  }
+}
+
+/// "Find my lights": you pick the order, each light blinks in turn, you aim the circle at it, and it lands on the map.
 private struct ScanSheet: View {
   var room: Room
-  let openMap: () -> Void
   @State private var scanner = LightScanner()
+  /// The order you tapped the lights in.
+  @State private var picked: [String] = []
   @Environment(\.dismiss) private var dismiss
 
   var body: some View {
@@ -1727,78 +1924,198 @@ private struct ScanSheet: View {
         Text("Find my lights").font(.system(.title, design: .rounded, weight: .bold))
         switch scanner.phase {
         case .unsupported:
-          Text("This iPhone can't track motion for scanning. Place your lights on the room map instead.")
+          Text("This iPhone can't track motion for scanning. Drag your lights into place on the map instead.")
             .foregroundStyle(Ink.dim)
-          wide("Open room map", action: openMap)
         case .ready:
-          VStack(alignment: .leading, spacing: 10) {
-            step(1, "Dim the room if you can. Stand or sit where you usually are.")
-            step(2, "Tap Start and hold the phone up, like taking a panorama.")
-            step(3, "Turn slowly all the way around. The lights in \(room.currentRoom) blink one at a time; the ring fills as the app sees each one.")
-            step(4, "Tap Finish when the ring is mostly full. Your lights go back to how they were.")
-          }
-          .foregroundStyle(Ink.dim)
-          wide("Start") { scanner.start(room: room) }
-            .disabled(room.scanTargets().isEmpty)
-          if room.scanTargets().isEmpty {
-            Text("No connected lights in \(room.currentRoom).").font(.footnote).foregroundStyle(Ink.bad)
-          }
-        case .preparing, .scanning:
-          ZStack {
-            CameraView(session: scanner.session)
-              .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-            Circle()
-              .trim(from: 0, to: scanner.coverage)
-              .stroke(Ink.text, style: StrokeStyle(lineWidth: 6, lineCap: .round))
-              .rotationEffect(.degrees(-90))
-              .frame(width: 120, height: 120)
-              .animation(.easeOut, value: scanner.coverage)
-          }
-          .frame(height: 360)
-          Text(scanner.phase == .preparing
-               ? "Getting the lights ready…"
-               : "Keep turning slowly. \(Int(scanner.coverage * 100))% of the room seen.")
-            .foregroundStyle(Ink.dim)
-          wide("Finish") { scanner.finish() }
-            .disabled(scanner.coverage < 0.3)
-          Button("Cancel") {
-            scanner.cancel()
-            dismiss()
-          }
-          .frame(maxWidth: .infinity, minHeight: 44)
+          intro
+        case .preparing, .aiming, .secondAim:
+          aiming
         case .done:
-          ForEach(Array(scanner.names.keys.sorted()), id: \.self) { id in
-            HStack {
-              Text(scanner.names[id] ?? id)
-              Spacer()
-              if let r = scanner.results[id] {
-                Text(String(format: "Found · reacts in %.1f s", r.latency)).foregroundStyle(Ink.dim)
-              } else {
-                Text("Not seen").foregroundStyle(Ink.bad)
-              }
-            }
-            .font(.subheadline)
-            .frame(minHeight: 44)
-          }
-          Text(scanner.results.count == scanner.names.count
-               ? "All found. Scenes now sweep around the room and arrive together."
-               : "Place the ones not seen on the room map, or scan again in a darker room.")
-            .font(.footnote)
-            .foregroundStyle(Ink.dim)
-          wide("Check the room map", action: openMap)
-          Button("Scan again") { scanner.start(room: room) }
-            .frame(maxWidth: .infinity, minHeight: 44)
+          results
         }
       }
       .padding(24)
     }
     .onDisappear { scanner.cancel() }
+    .sensoryFeedback(.success, trigger: scanner.results.count)
+    .sensoryFeedback(.impact(weight: .medium), trigger: scanner.phase)
+  }
+
+  private var intro: some View {
+    let lights = room.scanTargets()
+    return VStack(alignment: .leading, spacing: 20) {
+      VStack(alignment: .leading, spacing: 10) {
+        step(1, "Stand or sit where you usually are. That spot becomes the middle of the map.")
+        step(2, "Each light blinks in turn. Aim the circle at it, or at the glow it throws on the wall.")
+        step(3, scanner.oneAim
+             ? "It locks on by itself when it sees the blink. If it doesn't, tap It's here."
+             : "It locks on by itself, then asks you to take a big step sideways and aim again. Two aims tell it how far away the light is.")
+      }
+      .foregroundStyle(Ink.dim)
+      if lights.isEmpty {
+        Text("No connected lights in \(room.currentRoom).").font(.footnote).foregroundStyle(Ink.bad)
+      } else {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Order").font(.headline)
+          Text("Tap the lights in the order you want to find them. Lights you don't tap go last.")
+            .font(.footnote)
+            .foregroundStyle(Ink.dim)
+          ForEach(lights) { light in
+            let n = picked.firstIndex(of: light.id).map { $0 + 1 }
+            Button {
+              if let i = picked.firstIndex(of: light.id) { picked.remove(at: i) } else { picked.append(light.id) }
+            } label: {
+              HStack(spacing: 12) {
+                Text(n.map(String.init) ?? "")
+                  .font(.subheadline.weight(.bold).monospacedDigit())
+                  .frame(width: 28, height: 28)
+                  .foregroundStyle(n == nil ? Ink.dim : .black)
+                  .background(Circle().fill(n == nil ? Ink.raised : Ink.text))
+                Orb(item: light, size: 32)
+                Text(light.name).font(.body.weight(.semibold))
+                Spacer()
+                if room.placements[light.id]?.found == true {
+                  Text("On the map").font(.footnote).foregroundStyle(Ink.dim)
+                }
+              }
+              .padding(.horizontal, 12)
+              .frame(minHeight: 52)
+              .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised.opacity(0.6)))
+            }
+            .buttonStyle(Press())
+            .accessibilityLabel(n.map { "\(light.name), number \($0)" } ?? light.name)
+          }
+        }
+        .sensoryFeedback(.selection, trigger: picked)
+      }
+      wide("Start") { scanner.start(room: room, order: picked) }
+        .disabled(lights.isEmpty)
+    }
+  }
+
+  private var aiming: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      ZStack {
+        CameraView(session: scanner.session)
+          .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        // The circle the app watches: a fifth of the width, same as LightScanner.measure.
+        GeometryReader { geo in
+          let d = geo.size.width / 5
+          ZStack {
+            Circle().strokeBorder(.white.opacity(0.5), lineWidth: 2)
+            Circle()
+              .trim(from: 0, to: scanner.lock)
+              .stroke(Color(hex: 0x34C759), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+              .rotationEffect(.degrees(-90))
+              .animation(.easeOut(duration: 0.15), value: scanner.lock)
+          }
+          .frame(width: d, height: d)
+          .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+      }
+      .frame(height: 380)
+      .accessibilityHidden(true)
+
+      VStack(alignment: .leading, spacing: 6) {
+        Text(headline).font(.headline)
+        Text(detail).font(.subheadline).foregroundStyle(Ink.dim).fixedSize(horizontal: false, vertical: true)
+        if let hint = scanner.hint {
+          Text(hint).font(.footnote).foregroundStyle(Ink.bad)
+        }
+      }
+
+      if scanner.phase != .preparing {
+        HStack(spacing: 12) {
+          wide("It's here") { scanner.capture() }
+          Button("Skip") { scanner.skip() }
+            .font(.body.weight(.semibold))
+            .frame(minWidth: 72, minHeight: 52)
+        }
+        // Jump to any light, in any order.
+        ScrollView(.horizontal) {
+          HStack(spacing: 8) {
+            ForEach(scanner.order, id: \.self) { id in
+              let done = scanner.results[id] != nil
+              Button { scanner.pick(id) } label: {
+                HStack(spacing: 6) {
+                  if done { Image(systemName: "checkmark").font(.caption.weight(.bold)) }
+                  Text(scanner.names[id] ?? "Light").font(.footnote.weight(.semibold)).lineLimit(1)
+                }
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .foregroundStyle(scanner.current == id ? .black : Ink.text)
+                .background(Capsule().fill(scanner.current == id ? Ink.text : Ink.raised))
+              }
+              .buttonStyle(Press())
+            }
+          }
+        }
+        .scrollIndicators(.hidden)
+      }
+      HStack {
+        Button("Cancel") {
+          scanner.cancel()
+          dismiss()
+        }
+        Spacer()
+        if !scanner.results.isEmpty {
+          Button("Done") { scanner.finish() }.font(.body.weight(.semibold))
+        }
+      }
+      .frame(minHeight: 44)
+    }
+  }
+
+  private var headline: String {
+    switch scanner.phase {
+    case .preparing: "Getting the lights ready…"
+    case .secondAim: "Now step aside"
+    default: "Aim at \(scanner.currentName)"
+    }
+  }
+
+  private var detail: String {
+    switch scanner.phase {
+    case .preparing:
+      return "They flash white, then go dark. Hold the phone up like you're taking a photo."
+    case .secondAim:
+      let moved = scanner.stepAside
+      return moved < 0.4
+        ? "Take a big step to the side (about half a meter), then aim at \(scanner.currentName) again."
+        : "Good. Aim at \(scanner.currentName) again until the ring fills."
+    default:
+      return "It's blinking. Put it in the circle, or the patch of wall it lights, and hold still until the ring fills."
+    }
+  }
+
+  private var results: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      ForEach(scanner.order, id: \.self) { id in
+        HStack {
+          Text(scanner.names[id] ?? id)
+          Spacer()
+          if let r = scanner.results[id] {
+            Text(String(format: "%.1f m away", hypot(r.x, r.y))).foregroundStyle(Ink.dim)
+          } else {
+            Button("Find it") { scanner.pick(id) }
+          }
+        }
+        .font(.subheadline)
+        .frame(minHeight: 44)
+      }
+      Text(scanner.results.count == scanner.order.count
+           ? "All found. They're on the map, and scenes now roll across the room in order."
+           : "The ones not found can be dragged into place on the map.")
+        .font(.footnote)
+        .foregroundStyle(Ink.dim)
+      wide("See the map") { dismiss() }
+    }
   }
 
   private func step(_ n: Int, _ text: String) -> some View {
     HStack(alignment: .top, spacing: 10) {
       Text("\(n)").font(.subheadline.weight(.bold)).frame(width: 22, height: 22).background(Circle().fill(Ink.raised))
-      Text(text).font(.subheadline)
+      Text(text).font(.subheadline).fixedSize(horizontal: false, vertical: true)
     }
   }
 
@@ -1828,66 +2145,322 @@ private struct CameraView: UIViewRepresentable {
   func updateUIView(_ view: ARSCNView, context: Context) {}
 }
 
-/// Top-down room map, the fallback for lights the scan didn't see. You're in the middle; drag each light to where it is.
-private struct RoomMapSheet: View {
+/// The Map tab: where your lights are (found by scanning or dragged into place), how changes travel across the room,
+/// and keeping the slow bulb in step. One screen, because all three are the same room layout.
+private struct MapScreen: View {
   var room: Room
+  @State private var scanning = false
+  /// The map's frame stays put while you drag, so the scale doesn't shift under your finger.
+  @State private var frozen: MapFrame?
+  /// Bumped to ripple a light's dot (a sweep reaching it, or a tap).
+  @State private var pulse: [String: Int] = [:]
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  struct MapFrame: Equatable {
+    var minX: Double
+    var minY: Double
+    var span: Double
+  }
 
   var body: some View {
-    let lights = room.inRoom.filter { $0.caps.contains(.color) }
+    let lights = room.inRoom.filter { $0.caps.contains(.power) }
+    let placed = lights.filter { room.placements[$0.id] != nil }
+    let unplaced = lights.filter { room.placements[$0.id] == nil }
     ScrollView {
-      VStack(alignment: .leading, spacing: 20) {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("\(room.currentRoom) map").font(.system(.title, design: .rounded, weight: .bold))
-          Text("You're the dot in the middle. Lights found by scanning are already placed; drag any light to fix it. Dashed ones aren't placed yet.")
+      VStack(alignment: .leading, spacing: 28) {
+        header
+        if lights.isEmpty {
+          Text("No lights in \(room.currentRoom) yet. Add one on the Room tab.")
             .foregroundStyle(Ink.dim)
+        } else {
+          map(placed)
+          if !unplaced.isEmpty { tray(unplaced) }
+          sweepSection(lights)
+          syncSection(lights)
         }
-        GeometryReader { geo in
-          let side = geo.size.width
-          ZStack {
-            RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.raised.opacity(0.5))
-            Circle().fill(Ink.text).frame(width: 14, height: 14)
-            Text("You").font(.caption2).foregroundStyle(Ink.dim).offset(y: 16)
-            ForEach(Array(lights.enumerated()), id: \.element.id) { index, light in
-              let placed = room.placements[light.id]
-              let fallback = Double(index) / Double(max(1, lights.count)) * 2 * .pi
-              let x = placed?.x ?? sin(fallback) * 0.9
-              let y = placed?.y ?? -cos(fallback) * 0.9
-              VStack(spacing: 4) {
-                Circle()
-                  .fill(light.glow.color)
-                  .frame(width: 34, height: 34)
-                  .overlay(Circle().strokeBorder(Ink.text, style: StrokeStyle(lineWidth: 2, dash: placed == nil ? [4] : [])))
-                  // Same look, a 44 pt grab area.
-                  .padding(5)
-                  .contentShape(Circle())
-                Text(light.name).font(.caption2).lineLimit(1).fixedSize()
+      }
+      .padding(.horizontal, 20)
+      .padding(.vertical, 16)
+    }
+    .scrollIndicators(.hidden)
+    .background(Ink.bg.ignoresSafeArea())
+    .sheet(isPresented: $scanning) {
+      ScanSheet(room: room)
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Ink.card)
+        .presentationCornerRadius(32)
+        .preferredColorScheme(.dark)
+    }
+  }
+
+  private var header: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      HStack(alignment: .bottom) {
+        VStack(alignment: .leading, spacing: 4) {
+          Text("MAP").font(.caption2.weight(.heavy)).tracking(2.5).foregroundStyle(Ink.dim)
+          Text(room.currentRoom).font(.system(.largeTitle, design: .rounded, weight: .bold))
+        }
+        Spacer()
+        if room.rooms.count > 1 {
+          Menu {
+            ForEach(room.rooms, id: \.self) { name in
+              Button(name) { room.selectedRoom = name }
+            }
+          } label: {
+            Label("Room", systemImage: "chevron.up.chevron.down")
+              .font(.subheadline.weight(.semibold))
+              .padding(.horizontal, 14)
+              .frame(minHeight: 44)
+              .background(Capsule().fill(Ink.raised))
+          }
+        }
+      }
+      Text("Tap a light to make it blink. Drag lights to where they are, and the white dot to where you usually sit.")
+        .font(.subheadline)
+        .foregroundStyle(Ink.dim)
+      Button { scanning = true } label: {
+        Label("Find my lights with the camera", systemImage: "viewfinder")
+          .font(.body.weight(.semibold))
+          .frame(maxWidth: .infinity, minHeight: 52)
+          .foregroundStyle(.black)
+          .background(Capsule().fill(.white))
+      }
+      .buttonStyle(Press())
+      .disabled(room.scanTargets().isEmpty)
+    }
+  }
+
+  /// Fits every placed light and you, with at least 3 m across and a margin, centered.
+  private func frame(_ placed: [LightItem]) -> MapFrame {
+    let points = placed.compactMap { room.placements[$0.id] }.map { (x: $0.x, y: $0.y) } + [(x: Double(room.you.x), y: Double(room.you.y))]
+    let xs = points.map(\.x), ys = points.map(\.y)
+    let loX = xs.min() ?? 0, hiX = xs.max() ?? 0, loY = ys.min() ?? 0, hiY = ys.max() ?? 0
+    let span = max(3, hiX - loX, hiY - loY) + 1.5
+    return MapFrame(minX: (loX + hiX) / 2 - span / 2, minY: (loY + hiY) / 2 - span / 2, span: span)
+  }
+
+  private func map(_ placed: [LightItem]) -> some View {
+    let f = frozen ?? frame(placed)
+    return GeometryReader { geo in
+      let side = geo.size.width
+      let scale = side / f.span
+      let toView = { (x: Double, y: Double) in CGPoint(x: (x - f.minX) * scale, y: (y - f.minY) * scale) }
+      let toMap = { (p: CGPoint) -> (Double, Double) in
+        (min(f.minX + f.span, max(f.minX, Double(p.x) / scale + f.minX)), min(f.minY + f.span, max(f.minY, Double(p.y) / scale + f.minY)))
+      }
+      ZStack {
+        RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.card)
+        // A 1 m grid, so distances read at a glance.
+        Path { path in
+          var v = ceil(f.minX)
+          while v < f.minX + f.span {
+            let x = (v - f.minX) * scale
+            path.move(to: CGPoint(x: x, y: 0))
+            path.addLine(to: CGPoint(x: x, y: side))
+            v += 1
+          }
+          v = ceil(f.minY)
+          while v < f.minY + f.span {
+            let y = (v - f.minY) * scale
+            path.move(to: CGPoint(x: 0, y: y))
+            path.addLine(to: CGPoint(x: side, y: y))
+            v += 1
+          }
+        }
+        .stroke(Ink.line, lineWidth: 1)
+        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        Text("1 m squares · up is the way you faced when scanning")
+          .font(.caption2)
+          .foregroundStyle(Ink.dim)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+          .padding(.bottom, 10)
+
+        you
+          .position(toView(Double(room.you.x), Double(room.you.y)))
+          .gesture(DragGesture(minimumDistance: 2, coordinateSpace: .named("map"))
+            .onChanged { g in
+              if frozen == nil { frozen = f }
+              let m = toMap(g.location)
+              room.setYou(x: m.0, y: m.1)
+            }
+            .onEnded { _ in frozen = nil })
+
+        ForEach(placed) { light in
+          if let p = room.placements[light.id] {
+            dot(light, found: p.found)
+              .position(toView(p.x, p.y))
+              .onTapGesture {
+                room.identify(light.id)
+                pulse[light.id, default: 0] += 1
               }
-              .position(x: (x + 1) / 2 * side, y: (y + 1) / 2 * side)
-              .gesture(DragGesture().onChanged { g in
-                room.setPlacement(light.id, x: g.location.x / side * 2 - 1, y: g.location.y / side * 2 - 1)
-              })
+              .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named("map"))
+                .onChanged { g in
+                  if frozen == nil { frozen = f }
+                  let m = toMap(g.location)
+                  room.setPlacement(light.id, x: m.0, y: m.1)
+                }
+                .onEnded { _ in frozen = nil })
+              .accessibilityElement(children: .ignore)
               .accessibilityLabel(light.name)
               .accessibilityHint("Drag to where it sits in your room")
-            }
+              .accessibilityAction(named: "Blink") { room.identify(light.id) }
           }
-          .frame(width: side, height: side)
         }
-        .aspectRatio(1, contentMode: .fit)
-        Button {
-          room.testSweep()
-        } label: {
-          Label("Test the sweep", systemImage: "wave.3.right")
-            .font(.body.weight(.semibold))
-            .frame(maxWidth: .infinity, minHeight: 52)
-            .foregroundStyle(.black)
-            .background(Capsule().fill(.white))
+      }
+      .coordinateSpace(name: "map")
+      .frame(width: side, height: side)
+    }
+    .aspectRatio(1, contentMode: .fit)
+    .sensoryFeedback(.selection, trigger: frozen == nil)
+  }
+
+  private var you: some View {
+    VStack(spacing: 4) {
+      Circle()
+        .fill(Ink.text)
+        .frame(width: 16, height: 16)
+        .overlay(Circle().strokeBorder(Ink.bg, lineWidth: 3))
+        .padding(14)
+        .background(Circle().fill(Ink.text.opacity(0.08)))
+      Text("You").font(.caption2.weight(.semibold)).foregroundStyle(Ink.dim)
+    }
+    .contentShape(Rectangle())
+    .accessibilityLabel("You")
+    .accessibilityHint("Drag to where you usually sit")
+  }
+
+  private func dot(_ light: LightItem, found: Bool) -> some View {
+    let lit = light.status == .ready && light.on
+    let c = room.shown(light).color
+    return VStack(spacing: 4) {
+      ZStack {
+        // A ripple when a sweep reaches it or you tap it.
+        Circle()
+          .stroke(lit ? c : Ink.text, lineWidth: 3)
+          .frame(width: 34, height: 34)
+          .keyframeAnimator(initialValue: 0.0, trigger: pulse[light.id] ?? 0) { view, t in
+            view.scaleEffect(1 + t * 1.4).opacity(t == 0 || t == 1 ? 0 : 1 - t)
+          } keyframes: { _ in
+            LinearKeyframe(1.0, duration: reduceMotion ? 0.01 : 0.8)
+          }
+        Circle()
+          .fill(lit ? c : Ink.raised)
+          .frame(width: 34, height: 34)
+          .shadow(color: lit ? c.opacity(0.8) : .clear, radius: 12)
+          .overlay(Image(systemName: light.kind == .strip ? "light.strip.2" : "lightbulb.fill")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(lit ? .black.opacity(0.7) : Ink.dim))
+          .animation(.linear(duration: 0.12), value: room.shown(light))
+      }
+      Text(light.name).font(.caption2.weight(.medium)).lineLimit(1).fixedSize()
+      if !found {
+        Text("placed by hand").font(.system(size: 9)).foregroundStyle(Ink.dim)
+      }
+    }
+    .padding(5)
+    .contentShape(Rectangle())
+  }
+
+  /// Lights not on the map yet: tap to drop one next to you, then drag it into place.
+  private func tray(_ unplaced: [LightItem]) -> some View {
+    VStack(alignment: .leading, spacing: 10) {
+      Text("Not on the map yet").font(.headline)
+      Text("Tap one to put it next to you, then drag it where it belongs. Or find it with the camera.")
+        .font(.footnote)
+        .foregroundStyle(Ink.dim)
+      ScrollView(.horizontal) {
+        HStack(spacing: 8) {
+          ForEach(Array(unplaced.enumerated()), id: \.element.id) { i, light in
+            Button {
+              room.setPlacement(light.id, x: Double(room.you.x) + Double(i % 3 - 1), y: Double(room.you.y) - 1)
+            } label: {
+              Label(light.name, systemImage: "plus")
+                .font(.footnote.weight(.semibold))
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .background(Capsule().fill(Ink.raised))
+            }
+            .buttonStyle(Press())
+          }
         }
-        .buttonStyle(Press())
-        Text("Each tap rolls a new color around the room, in order, timed so every light lands together.")
+      }
+      .scrollIndicators(.hidden)
+    }
+  }
+
+  private func sweepSection(_ lights: [LightItem]) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("How scenes travel").font(.headline)
+      Text("A new scene rolls across the room this way, and each light shows it on its turn, the slow bulb included.")
+        .font(.footnote)
+        .foregroundStyle(Ink.dim)
+      ScrollView(.horizontal) {
+        HStack(spacing: 8) {
+          ForEach(Room.SweepStyle.allCases, id: \.self) { style in
+            let on = room.sweepStyle == style
+            Button { room.sweepStyle = style } label: {
+              Text(style.rawValue)
+                .font(.footnote.weight(.semibold))
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .foregroundStyle(on ? .black : Ink.text)
+                .background(Capsule().fill(on ? Ink.text : Ink.raised))
+            }
+            .buttonStyle(Press())
+            .accessibilityAddTraits(on ? .isSelected : [])
+          }
+        }
+      }
+      .scrollIndicators(.hidden)
+      .sensoryFeedback(.selection, trigger: room.sweepStyle)
+      Button {
+        let schedule = room.testSweep()
+        for light in lights {
+          DispatchQueue.main.asyncAfter(deadline: .now() + (schedule[light.id] ?? 0)) { pulse[light.id, default: 0] += 1 }
+        }
+      } label: {
+        Label("Try it", systemImage: "wave.3.right")
+          .font(.body.weight(.semibold))
+          .frame(maxWidth: .infinity, minHeight: 52)
+          .background(Capsule().fill(Ink.raised))
+      }
+      .buttonStyle(Press())
+    }
+  }
+
+  private func syncSection(_ lights: [LightItem]) -> some View {
+    VStack(alignment: .leading, spacing: 16) {
+      VStack(alignment: .leading, spacing: 6) {
+        Text("Keep lights in sync").font(.headline)
+        Text("Flash them and watch: everything should come back at the same moment. If a light comes back late, slide it right so it's sent earlier; early, slide it left.")
           .font(.footnote)
           .foregroundStyle(Ink.dim)
+          .fixedSize(horizontal: false, vertical: true)
       }
-      .padding(24)
+      Button { room.flashTogether() } label: {
+        Label("Flash all together", systemImage: "bolt.fill")
+          .font(.body.weight(.semibold))
+          .frame(maxWidth: .infinity, minHeight: 52)
+          .background(Capsule().fill(Ink.raised))
+      }
+      .buttonStyle(Press())
+      ForEach(lights) { light in
+        let nudge = room.syncNudge[light.id] ?? 0
+        VStack(alignment: .leading, spacing: 8) {
+          HStack {
+            Text(light.name).font(.subheadline.weight(.semibold))
+            Spacer()
+            Text(nudge == 0 ? "auto" : String(format: "%+.1f s", nudge))
+              .font(.footnote.monospacedDigit())
+              .foregroundStyle(Ink.dim)
+          }
+          // -1 s to +2 s, and a double tap goes back to auto.
+          PillSlider(value: Binding(get: { (nudge + 1) / 3 }, set: { room.setNudge(light.id, (($0 * 3 - 1) * 10).rounded() / 10) }),
+                     fill: AnyShapeStyle(room.shown(light).color), range: 0...1, label: "\(light.name) timing", showsPercent: false)
+            .frame(height: 32)
+            .onTapGesture(count: 2) { room.setNudge(light.id, 0) }
+        }
+      }
     }
   }
 }

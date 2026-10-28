@@ -8,6 +8,25 @@ struct RGB: Equatable, Codable {
   var r: Int, g: Int, b: Int
 
   static let white = RGB(r: 255, g: 255, b: 255)
+  static let black = RGB(r: 0, g: 0, b: 0)
+
+  static func hex(_ v: UInt32) -> RGB { RGB(r: Int(v >> 16 & 0xFF), g: Int(v >> 8 & 0xFF), b: Int(v & 0xFF)) }
+
+  /// The same color at a lower level (0–1), for showing a dimmed frame.
+  func scaled(_ level: Double) -> RGB {
+    RGB(r: Int(Double(r) * level), g: Int(Double(g) * level), b: Int(Double(b) * level))
+  }
+
+  /// Smoothly around a list of colors, one color per unit of `x`.
+  static func blend(_ colors: [RGB], _ x: Double) -> RGB {
+    guard !colors.isEmpty else { return .white }
+    let n = colors.count
+    let whole = floor(max(0, x))
+    let f = max(0, x) - whole
+    let a = colors[Int(whole) % n], b = colors[(Int(whole) + 1) % n]
+    let mix = { (p: Int, q: Int) in Int(Double(p) + Double(q - p) * f) }
+    return RGB(r: mix(a.r, b.r), g: mix(a.g, b.g), b: mix(a.b, b.b))
+  }
 
   /// Color temperature to RGB (Tanner Helland's curve fit), for lights without a real white channel.
   static func kelvin(_ k: Int) -> RGB {
@@ -244,6 +263,38 @@ enum Effect: Hashable {
   }()
   static let patterns = patternGroups.flatMap(\.1)
 
+  /// Which group a built-in pattern is in ("Fade", "Blink"…), which decides how it moves.
+  static func group(of id: UInt8) -> String {
+    patternGroups.first { $0.1.contains { $0.id == id } }?.0 ?? "Switch"
+  }
+
+  /// Roughly what a built-in pattern shows `t` seconds in, so the app's tiles move along with the strip.
+  /// The controller runs the real thing on its own clock; this only has to look like it.
+  static func preview(_ id: UInt8, at t: Double, speed: Int) -> RGB {
+    guard let p = patterns.first(where: { $0.id == id }), !p.colors.isEmpty else { return .white }
+    // ponytail: step lengths are eyeballed (2 s per color at speed 1, 0.2 s at 100); the controller's real timing
+    // isn't published. Watch a strip next to the app and adjust if they look far apart.
+    let step = 2.0 - 1.8 * Double(max(1, min(100, speed)) - 1) / 99
+    let colors = p.colors
+    switch group(of: id) {
+    case "Fade": return RGB.blend(colors, t / (step * 2))
+    case "Flash": return colors[Int(t / (step / 2)) % colors.count]
+    case "Strobe": return colors[Int(t / (step / 3)) % colors.count]
+    default: return colors[Int(t / step) % colors.count]
+    }
+  }
+
+  /// The Hubspace bulb's closest built-in effect, so a cloud bulb can join a strip pattern. Nil: hold the first color.
+  static func hubEffect(for id: UInt8) -> String? {
+    guard let p = patterns.first(where: { $0.id == id }) else { return nil }
+    let many = p.colors.count > 3
+    switch group(of: id) {
+    case "Fade": return many ? "fade-7" : "fade-3"
+    case "Switch", "Strobe": return many ? "jump-7" : "jump-3"
+    default: return many ? "jump-7" : nil
+    }
+  }
+
   var name: String {
     switch self {
     case .pattern(let id): Self.patterns.first { $0.id == id }?.name ?? "Effect"
@@ -251,6 +302,25 @@ enum Effect: Hashable {
     case .synced: "Rainbow in sync"
     case .candle: "Candlelight"
     case .fire: "Fireplace"
+    }
+  }
+
+  /// The colors it's drawn with on cards and the now-playing bar.
+  var colors: [RGB] {
+    switch self {
+    case .pattern(let id): Self.patterns.first { $0.id == id }?.colors.filter { $0 != .black } ?? Self.rainbow
+    case .phoneMic: [.hex(0xFF2D78), .hex(0xC56BFF), .hex(0x00D9FF)]
+    case .synced: Self.rainbow
+    case .candle: [.hex(0xFF8C1A), .hex(0xFFB347), .hex(0x7A3A00)]
+    case .fire: [.hex(0xFF3B00), .hex(0xFF8A00), .hex(0x5A1400)]
+    }
+  }
+
+  /// Built-in patterns have a speed; the flames and music set their own pace.
+  var hasSpeed: Bool {
+    switch self {
+    case .pattern, .synced: true
+    case .phoneMic, .candle, .fire: false
     }
   }
 
@@ -297,8 +367,10 @@ final class Room {
   let lamps: BulbBank
 
   private(set) var effect: Effect?
-  /// The strips the running effect plays on.
-  private var effectStrips: Set<UUID> = []
+  /// The lights the running effect plays on, by light id: strips, Bluetooth bulbs, and (for the whole room) the cloud bulb.
+  private(set) var effectLights: Set<String> = []
+  /// Each light's look from before the effect, so Stop puts it back.
+  private var effectRestore: [String: Mood.Snap] = [:]
   private(set) var mood: String?
   /// Music level 0–1 for the meter.
   private(set) var level: Double = 0
@@ -346,9 +418,44 @@ final class Room {
     strip.onDrop = { [weak self] _ in
       MainActor.assumeIsolated { self?.walkIn.stripDropped() }
     }
+    lamps.onConnect = { [weak self] in
+      MainActor.assumeIsolated { self?.walkIn.lightReady() }
+    }
+    displayTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+      MainActor.assumeIsolated { self?.refreshLive() }
+    }
   }
 
   let walkIn = WalkIn()
+
+  // MARK: What the lights show right now
+
+  /// Each light's color at this moment while something moves on it (an effect, a bulb's own effect), by light id.
+  /// The tiles, the power button and the glow read this, so the screen moves with the room.
+  private(set) var live: [String: RGB] = [:]
+  /// The last frame the app sent to each light in an app-run effect.
+  private var sent: [String: RGB] = [:]
+  private var displayTimer: Timer?
+  private let clockStart = Date()
+
+  /// The color to draw a light with: what it's showing right now.
+  func shown(_ item: LightItem) -> RGB { live[item.id] ?? item.glow }
+
+  private func refreshLive() {
+    var next: [String: RGB] = [:]
+    let t = Date().timeIntervalSince(clockStart)
+    if let effect {
+      for id in effectLights {
+        if case .pattern(let p) = effect { next[id] = Effect.preview(p, at: t, speed: speed) } else if let c = sent[id] { next[id] = c }
+      }
+    }
+    // A Hubspace bulb running its own effect.
+    for light in hubspace.lights where light.on {
+      guard let e = light.effect, next["hub:" + light.id] == nil else { continue }
+      next["hub:" + light.id] = HubspaceClient.preview(e, at: t, speed: light.speed)
+    }
+    if next != live { live = next }
+  }
 
   /// The strip's own report wins over what we remember, so IR remote changes show up here.
   private func apply(_ status: StripStatus, to id: UUID) {
@@ -567,7 +674,7 @@ final class Room {
     let on = roomReady.filter(\.on)
     guard !on.isEmpty else { return nil }
     let n = Double(on.count)
-    let sum = on.reduce((0.0, 0.0, 0.0)) { ($0.0 + Double($1.glow.r), $0.1 + Double($1.glow.g), $0.2 + Double($1.glow.b)) }
+    let sum = on.map(shown).reduce((0.0, 0.0, 0.0)) { ($0.0 + Double($1.r), $0.1 + Double($1.g), $0.2 + Double($1.b)) }
     return Color(red: sum.0 / n / 255, green: sum.1 / n / 255, blue: sum.2 / n / 255)
   }
 
@@ -605,10 +712,17 @@ final class Room {
   // MARK: Control
 
   func setPower(_ id: String, _ on: Bool) {
-    if !on { stopEffect(on: targets(id)) }
-    cancelSweep()
+    let lights = targets(id)
+    if !on { stopEffect(on: lights) }
     mood = nil
-    for light in targets(id) { power(light, on) }
+    guard lights.count > 1 else {
+      cancelSweep()
+      lights.forEach { power($0, on) }
+      return
+    }
+    // Several lights: they switch together, so the strips wait for the cloud bulb. The switches move right away.
+    for light in lights { stripUUID(light).map { s in updateLook(s) { $0.on = on } } }
+    together(lights) { [weak self] in self?.power($0, on) }
   }
 
   private func power(_ light: LightItem, _ on: Bool) {
@@ -671,8 +785,16 @@ final class Room {
     // Tapping the scene that's already on reshuffles which light gets which color (Hue does the same).
     shuffle = mood == m.id ? shuffle + 1 : 0
     stopEffect(on: roomReady)
-    let lights = roomReady.filter { $0.kind != .remote }
-    let order = mapOrder(lights)
+    play(m, on: roomReady.filter { $0.kind != .remote })
+    // Party switches colors on the strip; with Reduce flashing it rolls a smooth rainbow instead.
+    if case .party = m.look { start(reduceFlashing ? .synced : .pattern(10), on: Self.all) }
+    mood = m.id
+    startLiving(m)
+  }
+
+  /// A scene's look on these lights, rolled across the room.
+  private func play(_ m: Mood, on lights: [LightItem]) {
+    let order = mapOrder(roomReady.filter { $0.kind != .remote })
     let shift = shuffle
     sweep(lights) { [weak self] light in
       guard let self else { return }
@@ -680,36 +802,68 @@ final class Room {
         // Lights added after the scene was saved stay as they are.
         guard let snap = snaps[light.id] else { return }
         guard snap.on else { return self.power(light, false) }
-        self.brightness(light, snap.brightness)
-        if let k = snap.kelvin { self.white(light, k) } else { self.paint(light, snap.color) }
+        self.setLook(light, brightness: snap.brightness, color: snap.color, kelvin: snap.kelvin)
         return
       }
-      self.brightness(light, m.brightness)
       switch m.look {
-      case .color(let c): self.paint(light, c)
-      case .white(let k): self.white(light, k)
-      case .party: self.paint(light, RGB(r: 255, g: 0, b: 180))
-      case .palette(let colors): self.paintPalette(light, colors, order, shift)
+      case .color(let c): self.setLook(light, brightness: m.brightness, color: c)
+      case .white(let k): self.setLook(light, brightness: m.brightness, kelvin: k)
+      case .party: self.setLook(light, brightness: m.brightness, color: RGB(r: 255, g: 0, b: 180))
+      case .palette(let colors): self.setLook(light, brightness: m.brightness, color: self.paletteColor(light, colors, order, shift))
       case .snapshot: break
       }
     }
-    // Party switches colors on the strip; with Reduce flashing it rolls a smooth rainbow instead.
-    if case .party = m.look { start(reduceFlashing ? .synced : .pattern(10), on: Self.all) }
-    mood = m.id
-    startLiving(m)
+  }
+
+  /// Walk in: the welcome on the selected room's lights, skipping `except` (lights already welcomed). A late light
+  /// only gets lit if it's off, so one you switched on yourself is left alone. Returns the lights it lit.
+  @discardableResult
+  func welcome(scene id: String?, except: Set<String> = [], late: Bool = false) -> [String] {
+    let lights = roomReady.filter { $0.caps.contains(.power) && !except.contains($0.id) && !(late && $0.on) }
+    guard !lights.isEmpty else { return [] }
+    let m = id.flatMap { id in moods.first { $0.id == id } }
+    if let m, !late {
+      apply(m)
+    } else if let m {
+      play(m, on: lights)
+    } else {
+      mood = nil
+      together(lights) { [weak self] in self?.power($0, true) }
+      for light in lights { stripUUID(light).map { s in updateLook(s) { $0.on = true } } }
+    }
+    return lights.map(\.id)
+  }
+
+  /// Walk in, leaving: turns off what the app can still reach once you're gone, the cloud bulbs in your strips' rooms.
+  /// Returns how many it turned off.
+  func leaveOff() -> Int {
+    let rooms = Set(items.filter { $0.kind == .strip }.map(roomOf))
+    let bulbs = ready.filter { $0.kind == .bulb && $0.on && rooms.contains(roomOf($0)) }
+    bulbs.forEach { power($0, false) }
+    return bulbs.count
   }
 
   private var shuffle = 0
 
-  /// Palette colors go around the room in map order, so neighbors differ. Unplaced lights keep list order.
+  /// Palette colors go around the room in map order (seen from your spot), so neighbors differ. Unplaced lights go last.
   private func mapOrder(_ lights: [LightItem]) -> [String: Int] {
-    let angle = { (l: LightItem) in self.placements[l.id].map { atan2($0.y, $0.x) } ?? .infinity }
+    let angle = { (l: LightItem) in self.placements[l.id].map { atan2($0.y - self.you.y, $0.x - self.you.x) } ?? .infinity }
     return Dictionary(uniqueKeysWithValues: lights.sorted { angle($0) < angle($1) }.enumerated().map { ($1.id, $0) })
   }
 
-  private func paintPalette(_ light: LightItem, _ colors: [RGB], _ order: [String: Int], _ shift: Int) {
+  private func paletteColor(_ light: LightItem, _ colors: [RGB], _ order: [String: Int], _ shift: Int) -> RGB {
     let c = colors[((order[light.id] ?? 0) + shift) % colors.count]
-    paint(light, light.kind == .strip ? c.vivid : c)
+    return light.kind == .strip ? c.vivid : c
+  }
+
+  /// Brightness and color in one go. The cloud bulb gets them as one command, so it changes in one step, not two.
+  private func setLook(_ light: LightItem, brightness level: Int, color: RGB? = nil, kelvin: Int? = nil) {
+    if light.kind == .bulb, let h = hub(light) {
+      hubspace.setLook(h, brightness: level, color: color, kelvin: kelvin)
+      return
+    }
+    brightness(light, level)
+    if let kelvin { white(light, kelvin) } else if let color { paint(light, color) }
   }
 
   // MARK: Living scenes
@@ -735,7 +889,12 @@ final class Room {
         // Same order as when the scene was applied, so every light steps to its neighbor's color.
         let lights = self.roomReady.filter { $0.kind != .remote }
         let order = self.mapOrder(lights)
-        for light in lights where light.on { self.paintPalette(light, colors, order, self.shuffle) }
+        let shift = self.shuffle
+        // Together, so the cloud bulb hands its color on at the same moment as the strips.
+        self.together(lights.filter(\.on)) { [weak self] light in
+          guard let self else { return }
+          self.paint(light, self.paletteColor(light, colors, order, shift))
+        }
       }
     }
   }
@@ -806,8 +965,9 @@ final class Room {
 
   // MARK: Placement and sweeps
 
-  /// Where a light is, as seen from where you usually sit: x right, y toward you (-1…1), plus how long it
-  /// takes to react. Filled in by "Find my lights"; the room map is the fallback for anything not seen.
+  /// Where a light is on the room map, in meters from where you stood for "Find my lights": x right, y toward the back
+  /// (the top of the map is the way you faced). Plus how long it takes to react, and whether the scan measured that.
+  /// Spots saved before the scan used meters were -1…1; the map scales to fit, so they still show in the right order.
   struct Placement: Codable {
     var x: Double
     var y: Double
@@ -815,10 +975,25 @@ final class Room {
     var found: Bool
   }
 
+  /// How a change travels across the room.
+  enum SweepStyle: String, CaseIterable, Codable {
+    case around = "Around you", leftRight = "Left to right", frontBack = "Front to back", outward = "Out from you", together = "All at once"
+  }
+
   private(set) var placements: [String: Placement] = {
     guard let data = UserDefaults.standard.data(forKey: "placements") else { return [:] }
     return (try? JSONDecoder().decode([String: Placement].self, from: data)) ?? [:]
   }()
+  /// Where you usually are on the map; "Around you" and "Out from you" start here.
+  private(set) var you: CGPoint = {
+    let saved = UserDefaults.standard.array(forKey: "mapYou") as? [Double] ?? []
+    return saved.count == 2 ? CGPoint(x: saved[0], y: saved[1]) : .zero
+  }()
+  var sweepStyle = SweepStyle(rawValue: UserDefaults.standard.string(forKey: "sweepStyle") ?? "") ?? .around {
+    didSet { UserDefaults.standard.set(sweepStyle.rawValue, forKey: "sweepStyle") }
+  }
+  /// Your nudge per light from "Keep lights in sync", in seconds: positive means it shows changes late, so it's sent earlier.
+  private(set) var syncNudge = UserDefaults.standard.dictionary(forKey: "syncNudge") as? [String: Double] ?? [:]
   private var sweepTasks: [Task<Void, Never>] = []
   private var sweepColor = 0
   private var scanSaved: [LightItem] = []
@@ -827,8 +1002,8 @@ final class Room {
   static let sweepTime = 1.2
 
   func setPlacement(_ id: String, x: Double, y: Double) {
-    let latency = placements[id]?.latency ?? defaultLatency(item(id))
-    placements[id] = Placement(x: max(-1, min(1, x)), y: max(-1, min(1, y)), latency: latency, found: false)
+    let old = placements[id]
+    placements[id] = Placement(x: x, y: y, latency: old?.latency ?? 0, found: old?.found ?? false)
     savePlacements()
   }
 
@@ -837,7 +1012,23 @@ final class Room {
     savePlacements()
   }
 
-  private func defaultLatency(_ item: LightItem?) -> Double { item?.kind == .bulb ? 1.5 : 0.15 }
+  func setYou(x: Double, y: Double) {
+    you = CGPoint(x: x, y: y)
+    UserDefaults.standard.set([x, y], forKey: "mapYou")
+  }
+
+  func setNudge(_ id: String, _ seconds: Double) {
+    syncNudge[id] = abs(seconds) < 0.05 ? nil : seconds
+    UserDefaults.standard.set(syncNudge, forKey: "syncNudge")
+  }
+
+  /// Seconds from sending a command to seeing it: what the scan measured, else a live estimate (the cloud bulb's
+  /// round trip to Hubspace), plus your nudge.
+  func latency(_ l: LightItem) -> Double {
+    let measured = placements[l.id].flatMap { $0.found && $0.latency > 0 ? $0.latency : nil }
+    let base = measured ?? (l.kind == .bulb ? hubspace.expectedDelay : l.kind == .bleBulb ? 0.1 : 0.15)
+    return max(0, base + (syncNudge[l.id] ?? 0))
+  }
 
   private func savePlacements() { UserDefaults.standard.set(try? JSONEncoder().encode(placements), forKey: "placements") }
 
@@ -846,15 +1037,26 @@ final class Room {
     sweepTasks = []
   }
 
-  /// Runs `action` on each light so the change rolls around the room in order, and lands together: slow lights
-  /// (cloud bulbs, measured during the scan) are sent early by their extra delay. Unplaced lights go first.
-  private func sweep(_ lights: [LightItem], _ action: @escaping @MainActor (LightItem) -> Void) {
-    cancelSweep()
-    let latency = { (l: LightItem) in self.placements[l.id]?.latency ?? self.defaultLatency(l) }
-    let slowest = lights.map(latency).max() ?? 0
-    let angles = lights.compactMap { l in placements[l.id].map { (l.id, atan2($0.y, $0.x)) } }
-    var progress: [String: Double] = [:]
-    if angles.count >= 2 {
+  /// The same change on every light, landing at the same moment: fast lights wait out the slowest one's delay.
+  private func together(_ lights: [LightItem], _ action: @escaping @MainActor (LightItem) -> Void) {
+    sweep(lights, spread: false, action)
+  }
+
+  /// How far along the sweep each placed light is, 0 (first) to 1 (last). Unplaced lights aren't in it and go first.
+  private func sweepProgress(_ lights: [LightItem]) -> [String: Double] {
+    let placed = lights.compactMap { l in placements[l.id].map { (l.id, $0) } }
+    guard placed.count >= 2 else { return [:] }
+    let normalize = { (values: [(String, Double)]) -> [String: Double] in
+      let lo = values.map(\.1).min() ?? 0, hi = values.map(\.1).max() ?? 0
+      return Dictionary(uniqueKeysWithValues: values.map { ($0.0, hi - lo < 0.001 ? 0 : ($0.1 - lo) / (hi - lo)) })
+    }
+    switch sweepStyle {
+    case .together: return [:]
+    case .leftRight: return normalize(placed.map { ($0.0, $0.1.x) })
+    case .frontBack: return normalize(placed.map { ($0.0, $0.1.y) })
+    case .outward: return normalize(placed.map { ($0.0, hypot($0.1.x - you.x, $0.1.y - you.y)) })
+    case .around:
+      let angles = placed.map { ($0.0, atan2($0.1.y - you.y, $0.1.x - you.x)) }
       // Start right after the widest empty stretch of the circle, so the sweep never jumps across the room.
       let sorted = angles.sorted { $0.1 < $1.1 }
       var gapEnd = 0
@@ -866,12 +1068,25 @@ final class Room {
       }
       let start = sorted[gapEnd].1
       let span = max(0.001, 2 * .pi - widest)
-      for (id, a) in angles {
-        progress[id] = min(1, ((a - start + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)) / span)
-      }
+      return Dictionary(uniqueKeysWithValues: angles.map { id, a in
+        (id, min(1, ((a - start + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)) / span))
+      })
     }
+  }
+
+  /// When each light's turn comes in the sweep, in seconds after the first. For the map's animation.
+  func sweepSchedule(_ lights: [LightItem]) -> [String: Double] {
+    sweepProgress(lights).mapValues { $0 * Self.sweepTime }
+  }
+
+  /// Runs `action` on each light so the change rolls across the room in the chosen style, and every light shows it
+  /// on its turn: slow lights (the cloud bulb) are sent early by their extra delay.
+  private func sweep(_ lights: [LightItem], spread: Bool = true, _ action: @escaping @MainActor (LightItem) -> Void) {
+    cancelSweep()
+    let slowest = lights.map(latency).max() ?? 0
+    let progress = spread ? sweepProgress(lights) : [:]
     for light in lights {
-      let delay = (progress[light.id] ?? 0) * Self.sweepTime * (angles.count >= 2 ? 1 : 0) + (slowest - latency(light))
+      let delay = (progress[light.id] ?? 0) * Self.sweepTime + (slowest - latency(light))
       if delay < 0.02 {
         action(light)
       } else {
@@ -884,14 +1099,50 @@ final class Room {
     }
   }
 
-  /// Rolls the next color around the room so the order and timing can be checked.
-  func testSweep() {
+  /// Rolls the next color across the room so the order and timing can be checked. Returns when each light's turn is.
+  @discardableResult
+  func testSweep() -> [String: Double] {
     let colors = [RGB(r: 255, g: 90, b: 30), RGB(r: 0, g: 140, b: 255), RGB(r: 140, g: 0, b: 255), RGB(r: 0, g: 220, b: 120)]
     let c = colors[sweepColor % colors.count]
     sweepColor += 1
     stopEffect()
     mood = nil
-    sweep(roomReady.filter { $0.caps.contains(.color) }) { [weak self] in self?.paint($0, c) }
+    let lights = roomReady.filter { $0.caps.contains(.color) }
+    sweep(lights) { [weak self] in self?.paint($0, c) }
+    return sweepSchedule(lights)
+  }
+
+  /// "Keep lights in sync": every light in the room goes dark, then comes back at once, timed by each light's delay.
+  /// If one shows up late, nudge it on the map screen. Lights that were off end up off again.
+  func flashTogether() {
+    stopEffect()
+    mood = nil
+    let lights = roomReady.filter { $0.caps.contains(.power) }
+    let wasOn = Set(lights.filter(\.on).map(\.id))
+    let wait = (lights.map(latency).max() ?? 0) + 1.5
+    cancelSweep()
+    lights.forEach { scanPower($0.id, false) }
+    sweepTasks.append(Task { @MainActor [weak self] in
+      try? await Task.sleep(for: .seconds(wait))
+      guard let self, !Task.isCancelled else { return }
+      self.together(lights) { self.scanPower($0.id, true) }
+      try? await Task.sleep(for: .seconds(wait + 2))
+      guard !Task.isCancelled else { return }
+      for light in lights where !wasOn.contains(light.id) { self.scanPower(light.id, false) }
+    })
+  }
+
+  /// Blinks one light twice, so you can tell which dot on the map it is. Ends the way it started.
+  func identify(_ id: String) {
+    guard let light = item(id), light.status == .ready else { return }
+    let gap = max(0.5, latency(light) + 0.4)
+    let start = light.on
+    Task { @MainActor [weak self] in
+      for step in 0..<4 {
+        self?.scanPower(id, step % 2 == 0 ? !start : start)
+        try? await Task.sleep(for: .seconds(gap))
+      }
+    }
   }
 
   // MARK: Scanning (driven by LightScanner)
@@ -920,11 +1171,12 @@ final class Room {
     }
   }
 
+  /// Puts each found light on the map, in meters from where you stood, which becomes your spot.
   func scanFinished(_ found: [String: LightScanner.Result]) {
     for (id, r) in found {
-      // yaw 0 = the way the phone faced at the start, clockwise; that direction is "up" on the map.
-      placements[id] = Placement(x: sin(r.yaw) * 0.8, y: -cos(r.yaw) * 0.8, latency: r.latency, found: true)
+      placements[id] = Placement(x: r.x, y: r.y, latency: r.latency, found: true)
     }
+    if !found.isEmpty { setYou(x: 0, y: 0) }
     savePlacements()
     scanRestore()
   }
@@ -1023,50 +1275,66 @@ final class Room {
     UserDefaults.standard.set(try? JSONEncoder().encode(saved), forKey: "stripLooks")
   }
 
-  // MARK: Effects (strips only: the bulb goes through Home Depot's cloud, too slow to follow a beat)
 
-  /// The effect playing on this light, or on any strip in the room for `Room.all`.
+  // MARK: Effects
+
+  /// The effect playing on this light, or on any light in the room for `Room.all`.
   func effectPlaying(on id: String) -> Effect? {
-    let playing = targets(id).contains { light in stripUUID(light).map { effectStrips.contains($0) } ?? false }
-    return playing ? effect : nil
+    targets(id).contains { effectLights.contains($0.id) } ? effect : nil
   }
 
-  /// Starts an effect on one strip, or on every connected strip in the room for `Room.all`.
+  /// The lights in the running effect, as they are now.
+  private var effectItems: [LightItem] { ready.filter { effectLights.contains($0.id) } }
+
+  /// Starts an effect on one light, or on every light in the room for `Room.all`. Strips and Bluetooth bulbs take every
+  /// frame. The cloud bulb joins room-wide effects as well as it can: its own matching effect, or a color every few
+  /// seconds sent ahead by its delay, so it keeps pace instead of trailing.
   func start(_ e: Effect, on id: String) {
-    let strips = targets(id).compactMap(stripUUID)
+    let roomWide = id == Self.all || id == Self.everything
+    let lights = targets(id).filter { $0.kind == .strip || $0.kind == .bleBulb || ($0.kind == .bulb && roomWide) }
     stopEffect()
     effectError = nil
-    guard !strips.isEmpty else { return }
-    for s in strips { wakeStrip(s) }
+    guard !lights.isEmpty else { return }
     mood = nil
     effect = e
-    effectStrips = Set(strips)
+    effectLights = Set(lights.map(\.id))
+    effectRestore = Dictionary(uniqueKeysWithValues: lights.map {
+      ($0.id, Mood.Snap(color: $0.color, kelvin: $0.kelvin, brightness: $0.brightness, on: $0.on))
+    })
+    for light in lights {
+      if let s = stripUUID(light) { wakeStrip(s) }
+      if light.kind == .bleBulb, !light.on, let l = lamp(light) { lamps.setPower(l, true) }
+    }
     switch e {
     case .pattern(let p):
-      for s in strips {
-        strip.setPattern(s, p)
-        strip.setSpeed(s, speed)
+      for light in lights {
+        if let s = stripUUID(light) {
+          strip.setPattern(s, p)
+          strip.setSpeed(s, speed)
+        } else if light.kind == .bulb, let h = hub(light) {
+          if let builtIn = Effect.hubEffect(for: p) {
+            hubspace.setEffect(h, builtIn)
+            hubspace.setEffectSpeed(h, hubSpeed)
+          } else if let first = Effect.patterns.first(where: { $0.id == p })?.colors.first {
+            hubspace.setColor(h, r: first.r, g: first.g, b: first.b)
+          }
+        }
       }
+      // Bluetooth bulbs have no built-in patterns, so the app plays the pattern on them.
+      if lights.contains(where: { $0.kind == .bleBulb }) { tick(0.1) { $0.patternStep() } }
     case .synced:
       // Each controller runs built-in effects on its own clock, so two strips drift apart. One clock in the app keeps them together.
-      syncTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-        MainActor.assumeIsolated { self?.syncStep() }
-      }
+      tick(0.1) { $0.syncStep() }
     case .candle, .fire:
-      // Full brightness once; the flicker lives in the color, so each frame is one write per strip.
-      for s in strips {
-        strip.setBrightness(s, 100)
-        updateLook(s) { $0.brightness = 100 }
-      }
+      // Full brightness once; the flicker lives in the color, so each frame is one write per light.
+      for light in lights where light.kind != .bulb { brightness(light, 100) }
       flameLevels = [:]
-      syncTimer = Timer.scheduledTimer(withTimeInterval: e == .fire ? 0.09 : 0.14, repeats: true) { [weak self] _ in
-        MainActor.assumeIsolated { self?.flameStep() }
-      }
+      tick(e == .fire ? 0.09 : 0.14) { $0.flameStep() }
     case .phoneMic:
       Task {
         guard await AVAudioApplication.requestRecordPermission() else {
           effectError = "Allow the microphone in Settings to use your phone's mic."
-          effect = nil
+          stopEffect()
           return
         }
         guard effect == .phoneMic else { return }
@@ -1078,49 +1346,121 @@ final class Room {
     }
   }
 
-  /// Takes these lights out of the running effect; the effect ends when no strip is left in it.
+  /// The Stop button: ends the effect and puts each light back the way it was before it started, all at once.
+  func endEffect() {
+    let restore = effectRestore
+    let lights = effectItems
+    stopEffect()
+    together(lights) { [weak self] light in
+      guard let self, let snap = restore[light.id] else { return }
+      guard snap.on else { return self.power(light, false) }
+      self.setLook(light, brightness: snap.brightness, color: snap.color, kelvin: snap.kelvin)
+    }
+  }
+
+  /// Takes these lights out of the running effect; the effect ends when no light is left in it.
   private func stopEffect(on lights: [LightItem]) {
-    effectStrips.subtract(lights.compactMap(stripUUID))
-    if effectStrips.isEmpty { stopEffect() }
+    effectLights.subtract(lights.map(\.id))
+    if effectLights.isEmpty { stopEffect() }
   }
 
   /// Effect speed, 1–100: the built-in effects' speed command, and how fast the synced rainbow turns.
   private(set) var speed = UserDefaults.standard.object(forKey: "stripSpeed") as? Int ?? 50
   private var syncTimer: Timer?
+  /// The same speed on the Hubspace scale, -10 to 10.
+  private var hubSpeed: Int { max(-10, min(10, (speed - 50) / 5)) }
 
   func setSpeed(_ value: Int) {
     speed = max(1, min(100, value))
     UserDefaults.standard.set(speed, forKey: "stripSpeed")
-    if case .pattern = effect { for s in effectStrips { strip.setSpeed(s, speed) } }
-  }
-
-  /// One step of the synced rainbow: every strip gets the same color at the same moment. A full turn takes 60 s at
-  /// speed 1 and about 3 s at 100.
-  private func syncStep() {
-    guard effect == .synced else { return }
-    hue += 0.1 / (60 - Double(speed - 1) * 57 / 99)
-    let c = RGB.hue(hue)
-    for s in effectStrips { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
-  }
-
-  private var flameLevels: [UUID: Double] = [:]
-
-  /// Each strip flickers on its own, so two strips look like two flames, not one copied.
-  private func flameStep() {
-    guard effect == .candle || effect == .fire else { return }
-    for s in effectStrips {
-      let (c, level) = Effect.flame(fire: effect == .fire, level: flameLevels[s] ?? 0.7,
-                                    roll: Double.random(in: 0...1), hueRoll: Double.random(in: 0...1))
-      flameLevels[s] = level
-      strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false)
+    guard case .pattern = effect else { return }
+    for light in effectItems {
+      if let s = stripUUID(light) { strip.setSpeed(s, speed) }
+      if light.kind == .bulb, let h = hub(light), h.effect != nil { hubspace.setEffectSpeed(h, hubSpeed) }
     }
   }
 
-  /// Forgets the running effect. The strip leaves a built-in effect on its next color.
+  private func tick(_ interval: Double, _ step: @escaping @MainActor (Room) -> Void) {
+    syncTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+      MainActor.assumeIsolated { if let self { step(self) } }
+    }
+  }
+
+  /// One frame to a fast light (strip or Bluetooth bulb), straight away.
+  private func stream(_ light: LightItem, _ c: RGB, fade: Bool = false) {
+    switch light.kind {
+    case .strip: stripUUID(light).map { strip.setColor($0, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: fade) }
+    case .bleBulb: lamp(light).map { lamps.stream($0, c) }
+    case .bulb, .remote: return
+    }
+    sent[light.id] = c
+  }
+
+  private var cloudNext: [String: Date] = [:]
+
+  /// One frame to the cloud bulb, at most every `seconds`. `color` is given the bulb's delay, so it can aim that far ahead.
+  private func cloudFrame(_ light: LightItem, every seconds: Double, _ color: (Double) -> RGB) {
+    guard light.kind == .bulb, Date() >= cloudNext[light.id] ?? .distantPast, let h = hub(light) else { return }
+    cloudNext[light.id] = Date().addingTimeInterval(seconds)
+    let c = color(latency(light))
+    hubspace.setColor(h, r: c.r, g: c.g, b: c.b)
+  }
+
+  /// Built-in patterns, played by the app on Bluetooth bulbs (the strips run their own).
+  private func patternStep() {
+    guard case .pattern(let p) = effect else { return }
+    let c = Effect.preview(p, at: Date().timeIntervalSince(clockStart), speed: speed)
+    for light in effectItems where light.kind == .bleBulb { stream(light, c) }
+  }
+
+  /// One step of the synced rainbow: every light gets the same color at the same moment. A full turn takes 60 s at
+  /// speed 1 and about 3 s at 100.
+  private func syncStep() {
+    guard effect == .synced else { return }
+    let turn = 60 - Double(speed - 1) * 57 / 99
+    hue += 0.1 / turn
+    let c = RGB.hue(hue)
+    let now = hue
+    for light in effectItems {
+      if light.kind == .bulb {
+        sent[light.id] = c
+        // ponytail: one color every 3 s, aimed ahead by the bulb's delay; its own fade fills the gaps. Faster would
+        // risk Hubspace's rate limit, which isn't published (aioafero docs: "the API rate-limits requests").
+        cloudFrame(light, every: 3) { ahead in RGB.hue(now + ahead / turn) }
+      } else {
+        stream(light, c)
+      }
+    }
+  }
+
+  private var flameLevels: [String: Double] = [:]
+
+  /// Each light flickers on its own, so two strips look like two flames, not one copied. The cloud bulb glows and
+  /// shifts every few seconds.
+  private func flameStep() {
+    guard effect == .candle || effect == .fire else { return }
+    let fire = effect == .fire
+    for light in effectItems {
+      let (c, level) = Effect.flame(fire: fire, level: flameLevels[light.id] ?? 0.7,
+                                    roll: Double.random(in: 0...1), hueRoll: Double.random(in: 0...1))
+      flameLevels[light.id] = level
+      if light.kind == .bulb {
+        sent[light.id] = c
+        cloudFrame(light, every: 4) { _ in c }
+      } else {
+        stream(light, c)
+      }
+    }
+  }
+
+  /// Forgets the running effect. A strip leaves a built-in effect on its next color.
   func stopEffect() {
     syncTimer?.invalidate()
     syncTimer = nil
-    effectStrips = []
+    effectLights = []
+    effectRestore = [:]
+    sent = [:]
+    cloudNext = [:]
     if let engine {
       engine.inputNode.removeTap(onBus: 0)
       engine.stop()
@@ -1159,14 +1499,29 @@ final class Room {
     let gentle = reduceFlashing
     level = max(loud, level * (gentle ? 0.96 : 0.8))
     average = average * 0.95 + loud * 0.05
-    if loud > average + 0.15, loud > 0.3, Date().timeIntervalSince(lastBeat) > (gentle ? 1.5 : 0.25) {
+    let beat = loud > average + 0.15 && loud > 0.3 && Date().timeIntervalSince(lastBeat) > (gentle ? 1.5 : 0.25)
+    if beat {
       lastBeat = Date()
       hue += 0.13
-      let c = RGB.hue(hue)
-      for s in effectStrips { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: gentle) }
     }
+    let c = RGB.hue(hue)
     let floor = gentle ? 40.0 : 8.0
-    for s in effectStrips { strip.setBrightness(s, Int(floor + level * (100 - floor))) }
+    let percent = Int(floor + level * (100 - floor))
+    for light in effectItems {
+      switch light.kind {
+      case .strip:
+        guard let s = stripUUID(light) else { continue }
+        if beat { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: gentle) }
+        strip.setBrightness(s, percent)
+        sent[light.id] = c.scaled(Double(percent) / 100)
+      case .bleBulb:
+        stream(light, c.scaled(Double(percent) / 100))
+      case .bulb:
+        sent[light.id] = c
+        if beat { cloudFrame(light, every: 2.5) { _ in c } }
+      case .remote: break
+      }
+    }
   }
 
   /// Hides blink, flash and strobe effects and calms music mode, for anyone sensitive to flashing light.

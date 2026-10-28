@@ -1,30 +1,63 @@
+import CoreLocation
 import Foundation
 import Observation
+import UIKit
 
 /// Walk in: the room lights up when you get back, with your strips' Bluetooth as the sensor.
 ///
 /// GPS can't tell your door from the building: iOS geofences are good to about 200 m and only report a crossing
 /// after you've moved past it and stayed 20 s. Bluetooth reaches about your hallway. The app already keeps a
 /// pending connect to every strip, and iOS wakes it when one comes back in range (Apple TN3115), so:
-/// away 10+ minutes, then a strip reconnects → lights on. "Set my spot" records the strip's signal at your door,
+/// away long enough, then a strip reconnects → lights on. "Set my spot" records the strip's signal at your door,
 /// and arrival waits for at least that signal. If iOS won't read the signal in the background, the lights come on
 /// at reconnect instead of leaving you in the dark.
 ///
-/// There's no walk out: once you're out of range the app can't reach the strips to turn them off.
+/// Two gaps in that, and their fixes:
+/// - Swiping the app away stops iOS from relaunching it for Bluetooth (Apple QA1962). Region monitoring is the one
+///   wake-up that survives a swipe (Apple DTS on the developer forums), so the optional location backup watches a
+///   circle around home: crossing it relaunches the app, which re-arms the Bluetooth connects before you're in range.
+///   Leaving the circle also counts as being away, for when your strips never quite dropped.
+/// - Lights connect at different moments (the bulb loads from the cloud, a second strip is a wall further), so for
+///   a minute and a half after the welcome, any light in the room that turns up late gets it too.
+///
+/// There's no walk out for the strips: once you're out of range the app can't reach them. The cloud bulb can still be
+/// turned off from anywhere, so that's an option.
 @MainActor
 @Observable
-final class WalkIn {
-  /// How long every strip has to be out of range before a return counts as coming home.
-  static let away: TimeInterval = 10 * 60
+final class WalkIn: NSObject {
+  static let awayChoices = [5, 10, 20, 30]
   /// How long arrival waits for you to reach your spot before giving up (walking past, not in).
   static let spotWait: TimeInterval = 3 * 60
+  /// Lights that connect this long after the welcome still get it.
+  static let lateWindow: TimeInterval = 90
+  /// The location backup's circle. iOS wants at least about 100 m to be reliable; 150 m covers a dorm building.
+  static let homeRadius: CLLocationDistance = 150
+  private static let regionID = "walkInHome"
 
   var enabled = UserDefaults.standard.bool(forKey: "walkIn") {
-    didSet { UserDefaults.standard.set(enabled, forKey: "walkIn") }
+    didSet {
+      UserDefaults.standard.set(enabled, forKey: "walkIn")
+      updateGeofence()
+    }
   }
   /// The scene to play; nil turns the lights on the way they were.
   var sceneID = UserDefaults.standard.string(forKey: "walkInScene") {
     didSet { UserDefaults.standard.set(sceneID, forKey: "walkInScene") }
+  }
+  /// How long you have to be gone for a return to count as coming home.
+  var awayMinutes = UserDefaults.standard.object(forKey: "walkInAwayMinutes") as? Int ?? 10 {
+    didSet { UserDefaults.standard.set(awayMinutes, forKey: "walkInAwayMinutes") }
+  }
+  /// When you leave, turn off the lights the app can still reach (the cloud bulb).
+  var offWhenLeaving = UserDefaults.standard.bool(forKey: "walkInOffWhenLeaving") {
+    didSet { UserDefaults.standard.set(offWhenLeaving, forKey: "walkInOffWhenLeaving") }
+  }
+  /// The location backup.
+  var useLocation = UserDefaults.standard.bool(forKey: "walkInLocation") {
+    didSet {
+      UserDefaults.standard.set(useLocation, forKey: "walkInLocation")
+      if useLocation, home == nil { setHomeHere() } else { updateGeofence() }
+    }
   }
   /// Signal strength (dBm) at your door. Nil: light up as soon as a strip is back.
   private(set) var spot = UserDefaults.standard.object(forKey: "walkInSpot") as? Int {
@@ -33,34 +66,101 @@ final class WalkIn {
   private(set) var lastArrival = UserDefaults.standard.object(forKey: "walkInLast") as? Date {
     didSet { UserDefaults.standard.set(lastArrival, forKey: "walkInLast") }
   }
+  private(set) var home: CLLocationCoordinate2D? = {
+    let saved = UserDefaults.standard.array(forKey: "walkInHome") as? [Double] ?? []
+    return saved.count == 2 ? CLLocationCoordinate2D(latitude: saved[0], longitude: saved[1]) : nil
+  }() {
+    didSet { UserDefaults.standard.set(home.map { [$0.latitude, $0.longitude] }, forKey: "walkInHome") }
+  }
   private(set) var measuring = false
+  private(set) var locating = false
   var spotError: String?
+  var locationError: String?
 
-  /// When the last strip went out of range. Saved, since iOS may relaunch the app between leaving and coming back.
+  struct Event: Codable, Identifiable, Equatable {
+    let time: Date
+    let text: String
+    var id: Date { time }
+  }
+
+  /// What happened lately, newest first, so you can see why it did or didn't light up.
+  private(set) var events: [Event] = {
+    guard let data = UserDefaults.standard.data(forKey: "walkInEvents") else { return [] }
+    return (try? JSONDecoder().decode([Event].self, from: data)) ?? []
+  }()
+
+  /// When you left. Saved, since iOS may relaunch the app between leaving and coming back.
   private var awaySince = UserDefaults.standard.object(forKey: "walkInAway") as? Date {
     didSet { UserDefaults.standard.set(awaySince, forKey: "walkInAway") }
   }
+  private var arrivedAt: Date?
+  /// Lights already welcomed this time, so a late one is lit once and a light you switch off stays off.
+  private var welcomed: Set<String> = []
+  private var background: UIBackgroundTaskIdentifier = .invalid
+  private let location = CLLocationManager()
 
   weak var room: Room?
-
-  private var connected: [Strip] { room?.strip.strips.filter { $0.state == .connected } ?? [] }
-
-  func stripDropped() {
-    guard connected.isEmpty, awaySince == nil else { return }
-    awaySince = Date()
-  }
 
   /// When you last opened the app. Opening it reconnects the strips too, and that isn't walking in: without this,
   /// opening the app hours after getting home (if iOS didn't wake it on the way in) would turn the lights on.
   var appOpenedAt: Date?
 
+  override init() {
+    super.init()
+    // Set up early in launch: a region crossing that relaunched the app is delivered to this delegate (Apple DTS).
+    location.delegate = self
+  }
+
+  private var connected: [Strip] { room?.strip.strips.filter { $0.state == .connected } ?? [] }
+
+  private func note(_ text: String) {
+    events.insert(Event(time: Date(), text: text), at: 0)
+    events = Array(events.prefix(15))
+    UserDefaults.standard.set(try? JSONEncoder().encode(events), forKey: "walkInEvents")
+  }
+
+  // MARK: Leaving
+
+  func stripDropped() {
+    guard connected.isEmpty, awaySince == nil else { return }
+    left("Your strips went out of Bluetooth range.")
+  }
+
+  private func left(_ why: String) {
+    awaySince = Date()
+    arrivedAt = nil
+    guard enabled else { return }
+    note("Left. " + why)
+    if offWhenLeaving, let off = room?.leaveOff(), off > 0 {
+      note(off == 1 ? "Turned off the smart bulb." : "Turned off \(off) smart bulbs.")
+    }
+  }
+
+  // MARK: Coming back
+
   func stripConnected(_ id: UUID) {
+    lightReady()
     guard let since = awaySince else { return }
     awaySince = nil
-    if let opened = appOpenedAt, Date().timeIntervalSince(opened) < 30 { return }
+    guard enabled else { return }
+    let minutes = Int(Date().timeIntervalSince(since) / 60)
+    if let opened = appOpenedAt, Date().timeIntervalSince(opened) < 30 {
+      note("Back, but you'd just opened the app, so no welcome.")
+      return
+    }
     // A blip (strip unplugged a moment, or you stepped out briefly) isn't coming home.
-    guard enabled, Date().timeIntervalSince(since) >= Self.away else { return }
-    if let spot { waitForSpot(id, spot, until: Date().addingTimeInterval(Self.spotWait)) } else { arrive(id) }
+    guard Date().timeIntervalSince(since) >= Double(awayMinutes) * 60 else {
+      note("Back after \(minutes) min. Too short to count (the setting is \(awayMinutes) min).")
+      return
+    }
+    beginBackground()
+    if let spot {
+      note("Back in range after \(minutes) min. Waiting for you to reach your spot.")
+      waitForSpot(id, spot, until: Date().addingTimeInterval(Self.spotWait))
+    } else {
+      note("Back in range after \(minutes) min.")
+      arrive(id)
+    }
   }
 
   private func waitForSpot(_ id: UUID, _ spot: Int, until deadline: Date) {
@@ -69,29 +169,62 @@ final class WalkIn {
       MainActor.assumeIsolated {
         guard let rssi else {
           // No reading: the strip dropped again (walked past), or iOS won't read in the background.
-          if self.room?.strip.strips.first(where: { $0.id == id })?.state == .connected { self.arrive(id) }
+          if self.room?.strip.strips.first(where: { $0.id == id })?.state == .connected {
+            self.arrive(id)
+          } else {
+            self.note("The strip dropped again before you reached your spot. Walking past?")
+            self.awaySince = Date()
+            self.endBackground()
+          }
           return
         }
         if rssi >= spot {
           self.arrive(id)
         } else if Date() < deadline {
           DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { MainActor.assumeIsolated { self.waitForSpot(id, spot, until: deadline) } }
+        } else {
+          self.note("You didn't reach your spot within 3 minutes, so no welcome.")
+          self.endBackground()
         }
       }
     }
   }
 
-  private func arrive(_ id: UUID) {
+  private func arrive(_ id: UUID?) {
     guard let room else { return }
     // Light the room this strip is in.
-    if let item = room.item(Room.stripItemID(id)) { room.selectedRoom = room.roomOf(item) }
-    if let sceneID, let mood = room.moods.first(where: { $0.id == sceneID }) {
-      room.apply(mood)
-    } else {
-      room.setPower(Room.all, true)
-    }
+    if let id, let item = room.item(Room.stripItemID(id)) { room.selectedRoom = room.roomOf(item) }
+    welcomed = Set(room.welcome(scene: sceneID))
     lastArrival = Date()
+    arrivedAt = Date()
+    note(welcomed.isEmpty ? "Home, but no light in \(room.currentRoom) was ready yet." : "Welcome home: \(sceneID ?? "lights on") (\(welcomed.count) lights).")
+    beginBackground()
+    // The cloud bulb loads a few seconds after a background relaunch, and other lights connect when they connect.
+    Task { [weak self] in
+      for wait in [4.0, 8, 12] {
+        try? await Task.sleep(for: .seconds(wait))
+        self?.lightReady()
+      }
+      self?.endBackground()
+    }
   }
+
+  /// A light connected: if you just walked in, it gets the welcome too.
+  func lightReady() {
+    guard let arrivedAt, Date().timeIntervalSince(arrivedAt) < Self.lateWindow, let room else { return }
+    let late = room.welcome(scene: sceneID, except: welcomed, late: true)
+    guard !late.isEmpty else { return }
+    welcomed.formUnion(late)
+    note(late.count == 1 ? "One more light caught up." : "\(late.count) more lights caught up.")
+  }
+
+  /// "Try it now": runs the welcome as if you'd just walked in.
+  func tryNow() {
+    note("Test run.")
+    arrive(nil)
+  }
+
+  // MARK: Your spot
 
   /// Stand at your door and call this: averages a few readings from the nearest connected strip.
   func setSpot() {
@@ -120,6 +253,7 @@ final class WalkIn {
           }
           // A little slack, so standing a step further back still counts.
           self.spot = readings.reduce(0, +) / readings.count - 4
+          self.note("Spot set at \(self.spot!) dBm.")
         }
       }
     }
@@ -127,4 +261,119 @@ final class WalkIn {
   }
 
   func clearSpot() { spot = nil }
+
+  // MARK: Location backup
+
+  /// Saves where you are now as home and starts watching it. Needs "Always" location so iOS can wake the app.
+  func setHomeHere() {
+    locationError = nil
+    switch location.authorizationStatus {
+    case .denied, .restricted:
+      locationError = "Location is off for Dorm Remote. Turn it on in Settings → Dorm Remote → Location → Always."
+      return
+    case .notDetermined:
+      locating = true
+      location.requestAlwaysAuthorization()
+      return
+    default:
+      if location.authorizationStatus == .authorizedWhenInUse { location.requestAlwaysAuthorization() }
+      locating = true
+      location.desiredAccuracy = kCLLocationAccuracyBest
+      location.requestLocation()
+    }
+  }
+
+  private func updateGeofence() {
+    for region in location.monitoredRegions where region.identifier == Self.regionID { location.stopMonitoring(for: region) }
+    guard enabled, useLocation, let home, CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self) else { return }
+    let region = CLCircularRegion(center: home, radius: Self.homeRadius, identifier: Self.regionID)
+    region.notifyOnEntry = true
+    region.notifyOnExit = true
+    location.startMonitoring(for: region)
+  }
+
+  /// Crossing into the circle around home. Usually you're still a minute from your door, so this re-arms the
+  /// strips' connects (after a swipe-away nothing else would) and the strips decide when you're actually there.
+  private func nearHome() {
+    guard enabled else { return }
+    note("Near home (location).")
+    beginBackground()
+    room?.strip.reconnectNow()
+    // Never really left Bluetooth range: you're home now.
+    if awaySince != nil, let strip = connected.first {
+      stripConnected(strip.id)
+    } else {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 20) { MainActor.assumeIsolated { if self.arrivedAt == nil { self.endBackground() } } }
+    }
+  }
+
+  private func leftHome() {
+    guard awaySince == nil else { return }
+    left("You left the area around home (location).")
+  }
+
+  private func beginBackground() {
+    guard background == .invalid else { return }
+    background = UIApplication.shared.beginBackgroundTask(withName: "Walk in") { [weak self] in
+      MainActor.assumeIsolated { self?.endBackground() }
+    }
+  }
+
+  private func endBackground() {
+    guard background != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(background)
+    background = .invalid
+  }
+}
+
+extension WalkIn: CLLocationManagerDelegate {
+  nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+    let status = manager.authorizationStatus
+    MainActor.assumeIsolated {
+      guard locating else { return }
+      switch status {
+      case .authorizedAlways, .authorizedWhenInUse:
+        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.requestLocation()
+      case .denied, .restricted:
+        locating = false
+        locationError = "Location is off for Dorm Remote. Turn it on in Settings → Dorm Remote → Location → Always."
+      default: break
+      }
+    }
+  }
+
+  nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    guard let fix = locations.last else { return }
+    let coordinate = fix.coordinate, accuracy = fix.horizontalAccuracy
+    let always = manager.authorizationStatus == .authorizedAlways
+    MainActor.assumeIsolated {
+      guard locating else { return }
+      locating = false
+      home = coordinate
+      note("Home set (to within \(Int(accuracy)) m).")
+      if !always {
+        locationError = "Home is set, but iOS can only wake the app if location is set to Always: Settings → Dorm Remote → Location → Always."
+      }
+      updateGeofence()
+    }
+  }
+
+  nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+    MainActor.assumeIsolated {
+      guard locating else { return }
+      locating = false
+      locationError = "Couldn't get your location. Try again near a window."
+    }
+  }
+
+  nonisolated func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+    let id = region.identifier
+    MainActor.assumeIsolated { if id == Self.regionID { nearHome() } }
+  }
+
+  nonisolated func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+    let id = region.identifier
+    MainActor.assumeIsolated { if id == Self.regionID { leftHome() } }
+  }
 }
