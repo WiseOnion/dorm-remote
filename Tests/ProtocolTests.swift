@@ -1,4 +1,5 @@
 import CoreBluetooth
+import UIKit
 import XCTest
 @testable import DormRemote
 
@@ -42,9 +43,42 @@ final class DaybetterTests: XCTestCase {
     XCTAssertNil(StripStatus([0xA1, 0x13, 0x04, 0x01, 0x11, 0x1D]))
   }
 
+  // DoudGeorges PROTOCOL.md: request A0 00 08 "CCHIP" AC CA; answer "CCHIP" c1^36 c2^76; verdict byte 8, 0 = unlocked.
+  func testUnlock() throws {
+    XCTAssertEqual(hex(Daybetter.frame(Daybetter.challenge, Daybetter.cchip)), "A0 00 08 43 43 48 49 50 AC CA")
+    let challenge: [UInt8] = [0xA1, 0x00, 0x0A] + Daybetter.cchip + [0x10, 0x20, 0x00, 0x00]
+    let answer = try XCTUnwrap(Daybetter.unlockAnswer(to: challenge))
+    let body = Array(answer.prefix(10))
+    XCTAssertEqual(body, [0xA0, 0x01, 0x0A] + Daybetter.cchip + [0x10 ^ 36, 0x20 ^ 76])
+    let crc = Daybetter.crc16modbus(body)
+    XCTAssertEqual(Array(answer.suffix(2)), [UInt8(crc & 0xFF), UInt8(crc >> 8)])
+    // A status reply isn't a challenge.
+    XCTAssertNil(Daybetter.unlockAnswer(to: [0xA1, 0x10, 0x11, 0x01, 0x01, 0x00, 0x64, 0, 0, 0]))
+    XCTAssertEqual(Daybetter.unlockResult([0xA1, 0x01, 0x09] + Daybetter.cchip + [0x00]), true)
+    XCTAssertEqual(Daybetter.unlockResult([0xA1, 0x01, 0x09] + Daybetter.cchip + [0x01]), false)
+    XCTAssertNil(Daybetter.unlockResult([0xA1, 0x15, 0x04, 0x01, 0xF1, 0x1C]))
+  }
+
+  func testSpeedFrame() {
+    XCTAssertEqual(Array(Daybetter.frame(Daybetter.speed, [50]).prefix(4)), [0xA0, 0x16, 0x04, 50])
+  }
+
+  func testControllerFamilies() {
+    XCTAssertFalse(Daybetter.isSegmentController(CBUUID(string: "E031")))
+    XCTAssertFalse(Daybetter.isSegmentController(CBUUID(string: "FF10")))
+    XCTAssertTrue(Daybetter.isSegmentController(CBUUID(string: "E010")))
+    XCTAssertTrue(Daybetter.isSegmentController(CBUUID(string: "AE30")))
+    XCTAssertTrue(Daybetter.advertisesStrip([CBUUID(string: "C031")]))
+    XCTAssertTrue(Daybetter.advertisesStrip([CBUUID(string: "180A"), CBUUID(string: "AF30")]))
+    XCTAssertFalse(Daybetter.advertisesStrip([CBUUID(string: "180A")]))
+    XCTAssertFalse(Daybetter.advertisesStrip([]))
+  }
+
   func testStripNames() {
     XCTAssertTrue(Daybetter.looksLikeStrip("P031_3712"))
     XCTAssertTrue(Daybetter.looksLikeStrip("Smart Light"))
+    XCTAssertTrue(Daybetter.looksLikeStrip("WI-FI LIGHT"))
+    XCTAssertTrue(Daybetter.looksLikeStrip("BLE BULB"))
     XCTAssertFalse(Daybetter.looksLikeStrip("Echo Dot-107"))
     XCTAssertFalse(Daybetter.looksLikeStrip("PX31_1"))
   }
@@ -155,6 +189,90 @@ final class LookTests: XCTestCase {
     XCTAssertEqual(RGB.kelvin(2700), RGB(r: 255, g: 167, b: 87))
     XCTAssertEqual(RGB.kelvin(2200), RGB(r: 255, g: 146, b: 39))
     XCTAssertEqual(RGB.kelvin(6500), RGB(r: 255, g: 254, b: 250))
+  }
+
+  func testEveryShortcutSceneExists() {
+    for choice in SceneChoice.allCases { XCTAssertNotNil(choice.mood, choice.rawValue) }
+    XCTAssertEqual(Set(Mood.all.map(\.id)).count, Mood.all.count, "scene names must be unique")
+  }
+
+  func testSavedSceneRoundTrips() throws {
+    let snap = Mood.Snap(color: RGB(r: 1, g: 2, b: 3), kelvin: nil, brightness: 40, on: true)
+    let scene = Mood("Study", .mine, .snapshot(["strip": snap]), 40)
+    let back = try JSONDecoder().decode(Mood.self, from: JSONEncoder().encode(scene))
+    XCTAssertEqual(back.id, "Study")
+    XCTAssertEqual(back.group, .mine)
+    guard case .snapshot(let snaps) = back.look else { return XCTFail("wrong look") }
+    XCTAssertEqual(snaps["strip"], snap)
+  }
+
+  func testPhotoPalette() {
+    // Mostly red, some blue, a little green (too little to count), plus gray and black that are skipped.
+    let pixels = Array(repeating: RGB(r: 230, g: 20, b: 30), count: 60) + Array(repeating: RGB(r: 20, g: 40, b: 220), count: 30)
+      + [RGB(r: 0, g: 200, b: 0)] + Array(repeating: RGB(r: 128, g: 128, b: 128), count: 40) + Array(repeating: RGB(r: 5, g: 5, b: 5), count: 40)
+    let palette = Mood.palette(from: pixels)
+    XCTAssertEqual(palette, [RGB(r: 230, g: 20, b: 30), RGB(r: 20, g: 40, b: 220)])
+    XCTAssertEqual(Mood.palette(from: Array(repeating: RGB(r: 128, g: 128, b: 128), count: 10)), [])
+  }
+
+  func testPaletteFromRealImage() throws {
+    // Left half orange, right half blue, as a PNG, through the same path a picked photo takes.
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 200, height: 100)).image { ctx in
+      UIColor(red: 1, green: 0.4, blue: 0, alpha: 1).setFill()
+      ctx.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
+      UIColor(red: 0, green: 0.2, blue: 1, alpha: 1).setFill()
+      ctx.fill(CGRect(x: 100, y: 0, width: 100, height: 100))
+    }
+    let pixels = Mood.pixels(ofImage: try XCTUnwrap(image.pngData()))
+    XCTAssertEqual(pixels.count, 48 * 48)
+    let palette = Mood.palette(from: pixels)
+    // Resampling can blend a column at the seam into a third, small group.
+    XCTAssertGreaterThanOrEqual(palette.count, 2)
+    XCTAssertTrue(palette.contains { $0.r > 200 && $0.b < 60 }, "orange missing: \(palette)")
+    XCTAssertTrue(palette.contains { $0.b > 200 && $0.r < 60 }, "blue missing: \(palette)")
+  }
+
+  func testFlamesStayWarmAndInRange() {
+    var level = 0.7
+    for i in 0..<500 {
+      let roll = Double((i * 37) % 100) / 100, hueRoll = Double((i * 53) % 100) / 100
+      for fire in [false, true] {
+        let (c, next) = Effect.flame(fire: fire, level: level, roll: roll, hueRoll: hueRoll)
+        XCTAssertTrue((0.35...1).contains(next))
+        // Warm: red leads, blue stays low, nothing goes black.
+        XCTAssertGreaterThan(c.r, c.g)
+        XCTAssertLessThan(c.b, 20)
+        XCTAssertGreaterThan(c.r, 80)
+        level = next
+      }
+    }
+  }
+
+  @MainActor
+  func testReduceFlashingHidesRealGroups() {
+    let names = Set(Effect.patternGroups.map(\.0))
+    XCTAssertTrue(Room.flashingGroups.isSubset(of: names), "a hidden group name doesn't match: \(Room.flashingGroups)")
+    // Smooth effects stay available.
+    XCTAssertTrue(names.subtracting(Room.flashingGroups).contains("Fade"))
+  }
+
+  func testColorNames() {
+    XCTAssertEqual(RGB(r: 255, g: 0, b: 0).name, "Red")
+    XCTAssertEqual(RGB(r: 255, g: 90, b: 0).name, "Orange")
+    XCTAssertEqual(RGB(r: 0, g: 217, b: 255).name, "Cyan")
+    XCTAssertEqual(RGB(r: 0, g: 40, b: 255).name, "Blue")
+    XCTAssertEqual(RGB(r: 122, g: 0, b: 255).name, "Violet")
+    XCTAssertEqual(RGB(r: 255, g: 45, b: 120).name, "Pink")
+    XCTAssertEqual(RGB(r: 255, g: 180, b: 210).name, "Soft pink")
+    XCTAssertEqual(RGB.white.name, "White")
+  }
+
+  func testVividKeepsHueAndWhite() {
+    // Hue's pastel peach becomes a saturated orange on the strip; white stays white.
+    let peach = RGB(r: 255, g: 183, b: 130).vivid
+    XCTAssertEqual(peach.r, 255)
+    XCTAssertLessThan(peach.b, 40)
+    XCTAssertEqual(RGB.white.vivid, .white)
   }
 }
 

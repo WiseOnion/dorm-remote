@@ -34,6 +34,24 @@ struct RGB: Equatable, Codable {
   }
 
   var color: Color { Color(red: Double(r) / 255, green: Double(g) / 255, blue: Double(b) / 255) }
+
+  /// A plain name for the color ("Orange", "Soft pink"), for tiles and VoiceOver, so nobody has to judge a swatch.
+  var name: String {
+    let (h, s) = hueSaturation
+    if s < 0.12 { return "White" }
+    let bands: [(Double, String)] = [
+      (0.03, "Red"), (0.09, "Orange"), (0.14, "Amber"), (0.19, "Yellow"), (0.27, "Lime"), (0.42, "Green"), (0.5, "Teal"),
+      (0.55, "Cyan"), (0.62, "Sky blue"), (0.7, "Blue"), (0.78, "Violet"), (0.86, "Purple"), (0.96, "Pink"), (1.01, "Red"),
+    ]
+    let base = bands.first { h < $0.0 }?.1 ?? "Red"
+    return s < 0.45 ? "Soft " + base.lowercased() : base
+  }
+
+  /// Hue palettes are pastel for bulbs; on an RGB strip pastels wash toward white, so push the saturation.
+  var vivid: RGB {
+    let (h, s) = hueSaturation
+    return s < 0.05 ? self : .hue(h, saturation: min(1, s * 1.5 + 0.15))
+  }
 }
 
 struct LightItem: Identifiable {
@@ -68,34 +86,125 @@ struct LightItem: Identifiable {
 }
 
 /// Room-wide presets, applied to every light at once.
-struct Mood: Identifiable {
-  enum Look { case color(RGB), white(Int), party }
+struct Mood: Identifiable, Codable {
+  /// One light's part of a saved scene.
+  struct Snap: Codable, Equatable { var color: RGB; var kelvin: Int?; var brightness: Int; var on: Bool }
+  /// `palette` spreads its colors over the room's lights, one each, like a Hue scene.
+  /// `snapshot` puts each light back exactly as it was saved, keyed by light id.
+  enum Look: Codable { case color(RGB), white(Int), party, palette([RGB]), snapshot([String: Snap]) }
+  enum Group: String, CaseIterable, Codable {
+    case mine = "Yours", everyday = "Everyday", colorful = "Colorful", night = "Night", seasonal = "Seasonal"
+  }
+
   let id: String
+  let group: Group
   let look: Look
   let brightness: Int
 
+  init(_ id: String, _ group: Group, _ look: Look, _ brightness: Int) {
+    self.id = id
+    self.group = group
+    self.look = look
+    self.brightness = brightness
+  }
+
+  private static func hex(_ values: UInt32...) -> Look {
+    .palette(values.map { RGB(r: Int($0 >> 16 & 0xFF), g: Int($0 >> 8 & 0xFF), b: Int($0 & 0xFF)) })
+  }
+
+  // Palettes and brightness come from the Philips Hue scene gallery (RGB values captured in
+  // gist.github.com/labmonkey/a641f6b339ed9a71bdced64b9af91ee8), dimmest scenes raised a little for strips.
   static let all: [Mood] = [
-    Mood(id: "Relax", look: .white(2700), brightness: 60),
-    Mood(id: "Focus", look: .white(5000), brightness: 100),
-    Mood(id: "Sunset", look: .color(RGB(r: 255, g: 90, b: 30)), brightness: 70),
-    Mood(id: "Ocean", look: .color(RGB(r: 0, g: 140, b: 255)), brightness: 70),
-    Mood(id: "Movie", look: .color(RGB(r: 40, g: 40, b: 255)), brightness: 15),
-    Mood(id: "Night", look: .color(RGB(r: 255, g: 20, b: 0)), brightness: 5),
-    Mood(id: "Party", look: .party, brightness: 100),
+    Mood("Relax", .everyday, .white(2700), 60),
+    Mood("Read", .everyday, .white(3500), 100),
+    Mood("Focus", .everyday, .white(5000), 100),
+    Mood("Energize", .everyday, .white(6500), 100),
+    Mood("Sunrise", .everyday, .color(RGB(r: 255, g: 120, b: 40)), 45),
+
+    Mood("Party", .colorful, .party, 100),
+    Mood("Tropical twilight", .colorful, hex(0xCD7DFF, 0xFFB782, 0xFFBBED), 70),
+    Mood("Savanna sunset", .colorful, hex(0xFF5E24, 0xFFCD5A, 0xFF8244, 0xFFA75A), 60),
+    Mood("Arctic aurora", .colorful, hex(0x6EFFB9, 0x4188FF, 0x6DFAFF, 0x3F53FF), 50),
+    Mood("Spring blossom", .colorful, hex(0xFF7FC0, 0xFF917D, 0xFFB3E7, 0xFFCCEB), 60),
+    Mood("Golden pond", .colorful, hex(0xFF9C23, 0xFFD349, 0xFFA32A, 0xFFCA41), 65),
+    Mood("Honolulu", .colorful, hex(0xFF404E, 0xFF874C, 0xFFCD5F, 0xFF9A36), 70),
+    Mood("Blue lagoon", .colorful, hex(0x3EF4FF, 0xFFB68D, 0xAAFFF6, 0xD7FFD8), 50),
+    Mood("Miami", .colorful, hex(0xFF5F8B, 0x7AAEFF, 0xFF9359, 0xFFA059), 75),
+    Mood("Tokyo", .colorful, hex(0xFF2B78, 0x5C08FF, 0x3D90FF, 0xFFA125, 0xA919FF), 60),
+    Mood("Vapor wave", .colorful, hex(0x5F6DFF, 0xFF58E9, 0xFFB029, 0x8D1BFF), 78),
+    Mood("Soho", .colorful, hex(0xFF719B, 0x5500FF, 0xFFA171, 0x871BFF, 0x67FFDB), 62),
+    Mood("Disturbia", .colorful, hex(0x32FFEA, 0xFF5FF6, 0xFF2B42, 0x8EECFF), 63),
+
+    Mood("Movie", .night, .color(RGB(r: 40, g: 40, b: 255)), 15),
+    Mood("Nebula", .night, hex(0x6C15FF, 0xB37FFF, 0xFFB5E6, 0x97A2FF), 25),
+    Mood("Galaxy", .night, hex(0xEF7DFF, 0xFF6FA9, 0xFF8674), 25),
+    Mood("Blood moon", .night, hex(0x483CFF, 0xFFAE93, 0x6173FF, 0xFFB9D2), 20),
+    Mood("Moonlight", .night, hex(0x3E68FF, 0x5887FF, 0x83A4FF), 20),
+    Mood("Night", .night, .color(RGB(r: 255, g: 20, b: 0)), 5),
+
+    Mood("Halloween", .seasonal, hex(0xFF5A00, 0x7A00FF, 0x39FF14, 0xFF8C00), 70),
+    Mood("Aggie Pride", .seasonal, hex(0x004684, 0xFDB927), 85),
+    Mood("Christmas", .seasonal, hex(0xFF0000, 0x00C040, 0xFFD27A), 75),
+    Mood("Valentine's", .seasonal, hex(0xFF0040, 0xFF4FA0, 0xC0007A), 60),
   ]
 
   var swatch: [Color] {
     switch look {
-    case .color(let c): [c.color, c.color.opacity(0.5)]
-    case .white(let k): [RGB.kelvin(k).color, RGB.kelvin(k + 1500).color]
-    case .party: [.pink, .purple, .blue, .cyan]
+    case .color(let c): return [c.color, c.color.opacity(0.5)]
+    case .white(let k): return [RGB.kelvin(k).color, RGB.kelvin(k + 1500).color]
+    case .party: return [.pink, .purple, .blue, .cyan]
+    case .palette(let colors): return colors.map { $0.vivid.color }
+    case .snapshot(let snaps):
+      // Sorted by light id so the swatch doesn't reshuffle between redraws.
+      let lit = snaps.keys.sorted().compactMap { snaps[$0] }.filter(\.on).map { ($0.kelvin.map(RGB.kelvin) ?? $0.color).color }
+      return lit.isEmpty ? [.gray, .black] : lit
     }
+  }
+
+  /// The photo shrunk to 48×48, as pixels. Small is plenty for picking colors and keeps it instant.
+  static func pixels(ofImage data: Data) -> [RGB] {
+    guard let image = UIImage(data: data)?.cgImage else { return [] }
+    let side = 48
+    var buffer = [UInt8](repeating: 0, count: side * side * 4)
+    let drawn = buffer.withUnsafeMutableBytes { raw -> Bool in
+      guard let ctx = CGContext(data: raw.baseAddress, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+      ctx.interpolationQuality = .medium
+      ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+      return true
+    }
+    guard drawn else { return [] }
+    var pixels: [RGB] = []
+    pixels.reserveCapacity(side * side)
+    for i in stride(from: 0, to: buffer.count, by: 4) {
+      let r = Int(buffer[i]), g = Int(buffer[i + 1]), b = Int(buffer[i + 2])
+      pixels.append(RGB(r: r, g: g, b: b))
+    }
+    return pixels
+  }
+
+  /// Picks a few colors that stand out in a photo: drops dark and gray pixels, groups the rest by hue,
+  /// and averages the biggest groups. Returned brightest-group first.
+  static func palette(from pixels: [RGB], count: Int = 4) -> [RGB] {
+    var bins = [(n: Int, r: Int, g: Int, b: Int)](repeating: (0, 0, 0, 0), count: 18)
+    for p in pixels {
+      let (h, s) = p.hueSaturation
+      guard s > 0.3, max(p.r, p.g, p.b) > 60 else { continue }
+      let i = min(17, Int(h * 18))
+      bins[i] = (bins[i].n + 1, bins[i].r + p.r, bins[i].g + p.g, bins[i].b + p.b)
+    }
+    // Ignore groups too small to be a real part of the picture.
+    let floor = max(1, pixels.count / 50)
+    return bins.filter { $0.n >= floor }
+      .sorted { $0.n > $1.n }
+      .prefix(count)
+      .map { RGB(r: $0.r / $0.n, g: $0.g / $0.n, b: $0.b / $0.n) }
   }
 }
 
-/// Strip effects. Built-in effects run on the controller; phone-mic music runs in the app.
+/// Strip effects. Built-in effects run on the controller; phone-mic music, the synced rainbow, and the flames run in the app.
 enum Effect: Hashable {
-  case pattern(UInt8), phoneMic
+  case pattern(UInt8), phoneMic, synced, candle, fire
 
   struct Pattern: Identifiable {
     let name: String
@@ -139,7 +248,27 @@ enum Effect: Hashable {
     switch self {
     case .pattern(let id): Self.patterns.first { $0.id == id }?.name ?? "Effect"
     case .phoneMic: "Phone mic"
+    case .synced: "Rainbow in sync"
+    case .candle: "Candlelight"
+    case .fire: "Fireplace"
     }
+  }
+
+  /// One flame frame: a warm color whose level wanders. `level` is the strip's last level (0–1); the result keeps it
+  /// moving smoothly for a candle and in jumps for a fire. Kept here, without randomness of its own, so it can be tested.
+  static func flame(fire: Bool, level: Double, roll: Double, hueRoll: Double) -> (RGB, Double) {
+    let next: Double
+    if fire {
+      // Mostly mid to bright with sudden flares and dips.
+      next = max(0.35, min(1, level + (roll - 0.5) * 0.6))
+    } else {
+      // A candle sways gently around 70 % and rarely gutters.
+      let target = roll < 0.04 ? 0.35 : 0.7
+      next = max(0.4, min(0.95, level + (target - level) * 0.25 + (roll - 0.5) * 0.12))
+    }
+    let green = fire ? 40 + hueRoll * 90 : 110 + hueRoll * 30
+    let base = RGB(r: 255, g: Int(green), b: fire ? 0 : Int(hueRoll * 12))
+    return (RGB(r: Int(Double(base.r) * next), g: Int(Double(base.g) * next), b: Int(Double(base.b) * next)), next)
   }
 }
 
@@ -168,13 +297,15 @@ final class Room {
   let lamps: BulbBank
 
   private(set) var effect: Effect?
+  /// The strips the running effect plays on.
+  private var effectStrips: Set<UUID> = []
   private(set) var mood: String?
   /// Music level 0–1 for the meter.
   private(set) var level: Double = 0
   var effectError: String?
 
-  // The strip never reports its state, so remember what we last sent.
-  private var stripLook: LightItem
+  // Strips only report power and brightness, so remember what we last sent to each.
+  private var stripLooks: [UUID: SavedLook]
   private var names: [String: String]
   /// Per-light choice: true = shared with roommates (kept out of scenes, All on/off, and schedules).
   private var sharedChoice = UserDefaults.standard.dictionary(forKey: "sharedLights") as? [String: Bool] ?? [:]
@@ -195,37 +326,55 @@ final class Room {
     self.bridge = bridge
     self.lamps = lamps
     names = UserDefaults.standard.dictionary(forKey: "names") as? [String: String] ?? [:]
-    stripLook = LightItem(id: Self.stripID, name: "LED strip", kind: .strip, status: .setup)
-    if let data = UserDefaults.standard.data(forKey: "stripLook"),
-       let saved = try? JSONDecoder().decode(SavedLook.self, from: data) {
-      stripLook.on = saved.on
-      stripLook.brightness = saved.brightness
-      stripLook.color = saved.color
-      stripLook.kelvin = saved.kelvin
+    if let data = UserDefaults.standard.data(forKey: "stripLooks"),
+       let saved = try? JSONDecoder().decode([String: SavedLook].self, from: data) {
+      stripLooks = Dictionary(uniqueKeysWithValues: saved.compactMap { k, v in UUID(uuidString: k).map { ($0, v) } })
+    } else if let first = StripController.firstID, let data = UserDefaults.standard.data(forKey: "stripLook"),
+              let saved = try? JSONDecoder().decode(SavedLook.self, from: data) {
+      // Saved before the app handled more than one strip.
+      stripLooks = [first: saved]
+    } else {
+      stripLooks = [:]
     }
-    strip.onStatus = { [weak self] status in
-      MainActor.assumeIsolated { self?.apply(status) }
+    strip.onStatus = { [weak self] id, status in
+      MainActor.assumeIsolated { self?.apply(status, to: id) }
+    }
+    walkIn.room = self
+    strip.onConnect = { [weak self] id in
+      MainActor.assumeIsolated { self?.walkIn.stripConnected(id) }
+    }
+    strip.onDrop = { [weak self] _ in
+      MainActor.assumeIsolated { self?.walkIn.stripDropped() }
     }
   }
 
+  let walkIn = WalkIn()
+
   /// The strip's own report wins over what we remember, so IR remote changes show up here.
-  private func apply(_ status: StripStatus) {
-    stripLook.on = status.on
-    stripLook.brightness = status.brightness
-    saveStrip()
+  private func apply(_ status: StripStatus, to id: UUID) {
+    updateLook(id) {
+      $0.on = status.on
+      $0.brightness = status.brightness
+    }
+  }
+
+  /// The first strip keeps the id "strip" from when there was only one; the rest are "strip:<uuid>".
+  static func stripItemID(_ id: UUID) -> String {
+    id == StripController.firstID ? stripID : "strip:" + id.uuidString
+  }
+
+  private func stripUUID(_ light: LightItem) -> UUID? {
+    strip.strips.first { Self.stripItemID($0.id) == light.id }?.id
   }
 
   // MARK: Lights
 
   var items: [LightItem] {
-    var strip = stripLook
-    strip.name = names[Self.stripID] ?? "LED strip"
-    strip.status = switch self.strip.state {
-    case .connected: .ready
-    case .connecting, .unlocking: .busy("Connecting")
-    case .off: .offline("Bluetooth is off")
-    case .failed(let m): .offline(m)
-    case .idle, .scanning: self.strip.hasSaved ? .busy("Looking") : .setup
+    let strips: [LightItem] = strip.strips.enumerated().map { i, s in
+      let id = Self.stripItemID(s.id)
+      let look = stripLooks[s.id] ?? SavedLook()
+      return LightItem(id: id, name: names[id] ?? (i == 0 ? "LED strip" : "LED strip \(i + 1)"), kind: .strip,
+                       status: stripStatus(s), on: look.on, brightness: look.brightness, color: look.color, kelvin: look.kelvin)
     }
 
     var list: [LightItem] = []
@@ -235,7 +384,8 @@ final class Room {
     switch hubspace.state {
     case .ready:
       list += hubspace.lights.map { l in
-        LightItem(id: "hub:" + l.id, name: names["hub:" + l.id] ?? l.name, kind: .bulb, status: .ready,
+        LightItem(id: "hub:" + l.id, name: names["hub:" + l.id] ?? l.name, kind: .bulb,
+                  status: hubspace.offline.contains(l.id) ? .offline("Not on Wi-Fi. Tap for help") : .ready,
                   on: l.on, brightness: l.brightness, color: RGB(r: l.r, g: l.g, b: l.b), kelvin: l.kelvin,
                   effect: l.effect, speed: l.speed)
       }
@@ -248,7 +398,12 @@ final class Room {
                 status: lamps.connected.contains(b.id) ? .ready : .busy("Looking"),
                 on: b.on, brightness: b.brightness, color: b.color, kelvin: b.kelvin)
     }
-    list.append(strip)
+    list += strips
+    // No strip yet: a row that opens setup.
+    if strips.isEmpty {
+      list.append(LightItem(id: Self.stripID, name: names[Self.stripID] ?? "LED strip", kind: .strip,
+                            status: strip.bluetoothOn ? .setup : .offline("Bluetooth is off")))
+    }
     let remoteStatus: LightItem.Status = switch bridge.state {
     case .ready: .ready
     case .connecting: .busy("Connecting to bridge")
@@ -261,6 +416,16 @@ final class Room {
     return list.filter { !hidden.contains($0.id) && !($0.kind == .bulb && hidden.contains("hub")) }
   }
 
+  private func stripStatus(_ s: Strip) -> LightItem.Status {
+    guard strip.bluetoothOn else { return .offline("Bluetooth is off") }
+    switch s.state {
+    case .connected: return .ready
+    case .connecting: return .busy("Connecting")
+    case .idle: return .busy("Looking")
+    case .failed(let m): return .offline(m)
+    }
+  }
+
   enum AddKind: String, CaseIterable, Identifiable {
     case strip = "DayBetter LED strip", hubspace = "Hubspace bulb", bluetooth = "Bluetooth bulb", remote = "Remote-controlled device (IR)"
     var id: String { rawValue }
@@ -270,9 +435,15 @@ final class Room {
   func remove(_ item: LightItem) {
     switch item.kind {
     case .strip:
-      stopEffect()
-      strip.disconnect()
-      hidden.insert(Self.stripID)
+      if let id = stripUUID(item) {
+        stopEffect(on: [item])
+        strip.remove(id)
+        stripLooks[id] = nil
+        saveStrips()
+      } else {
+        // The setup row: hide it until "Add".
+        hidden.insert(Self.stripID)
+      }
     case .bulb:
       // Just this bulb; the other bulbs on the account (a roommate's, say) stay. Signing out is in the menu.
       hidden.insert(item.id)
@@ -400,6 +571,31 @@ final class Room {
     return Color(red: sum.0 / n / 255, green: sum.1 / n / 255, blue: sum.2 / n / 255)
   }
 
+  /// Colors picked on the wheel, newest first, so a favorite is one tap away next time.
+  private(set) var recentColors: [RGB] = {
+    guard let data = UserDefaults.standard.data(forKey: "recentColors") else { return [] }
+    return (try? JSONDecoder().decode([RGB].self, from: data)) ?? []
+  }()
+
+  func remember(_ c: RGB) {
+    // Near-duplicates (a wheel drag ending a pixel away) replace the old entry.
+    recentColors.removeAll { abs($0.r - c.r) + abs($0.g - c.g) + abs($0.b - c.b) < 24 }
+    recentColors.insert(c, at: 0)
+    recentColors = Array(recentColors.prefix(8))
+    UserDefaults.standard.set(try? JSONEncoder().encode(recentColors), forKey: "recentColors")
+  }
+
+  /// Pull to refresh: reconnect anything that dropped and re-read the bulbs.
+  func reconnect() async {
+    strip.reconnectNow()
+    hubspace.clearOffline()
+    switch hubspace.state {
+    case .ready: await hubspace.refresh()
+    case .unavailable: await hubspace.load()
+    default: break
+    }
+  }
+
   func rename(_ id: String, to name: String) {
     let trimmed = name.trimmingCharacters(in: .whitespaces)
     names[id] = trimmed.isEmpty ? nil : trimmed
@@ -409,19 +605,21 @@ final class Room {
   // MARK: Control
 
   func setPower(_ id: String, _ on: Bool) {
-    if !on { stopEffect() }
+    if !on { stopEffect(on: targets(id)) }
     cancelSweep()
     mood = nil
-    for light in targets(id) {
-      switch light.kind {
-      case .strip:
-        strip.setPower(on)
-        stripLook.on = on
-        saveStrip()
-      case .bulb: hub(light).map { hubspace.setPower($0, on) }
-      case .bleBulb: lamp(light).map { lamps.setPower($0, on) }
-      case .remote: break
-      }
+    for light in targets(id) { power(light, on) }
+  }
+
+  private func power(_ light: LightItem, _ on: Bool) {
+    switch light.kind {
+    case .strip:
+      guard let s = stripUUID(light) else { break }
+      strip.setPower(s, on)
+      updateLook(s) { $0.on = on }
+    case .bulb: hub(light).map { hubspace.setPower($0, on) }
+    case .bleBulb: lamp(light).map { lamps.setPower($0, on) }
+    case .remote: break
     }
   }
 
@@ -434,30 +632,30 @@ final class Room {
   func setColor(_ id: String, _ color: RGB) {
     cancelSweep()
     mood = nil
-    if targets(id).contains(where: { $0.kind == .strip }) { stopEffect() }
+    stopEffect(on: targets(id))
     for light in targets(id) { paint(light, color) }
   }
 
   func setWhite(_ id: String, _ kelvin: Int) {
     cancelSweep()
     mood = nil
-    if targets(id).contains(where: { $0.kind == .strip }) { stopEffect() }
+    stopEffect(on: targets(id))
     for light in targets(id) { white(light, kelvin) }
   }
 
-  /// Shows one color on the strip and on your bulbs at once, so the strip's balance can be matched by eye.
+  /// Shows one color on the strips and on your bulbs at once, so the strips' balance can be matched by eye.
   func showForMatching(_ c: RGB) {
     stopEffect()
     mood = nil
-    // The strip's room, whichever tab is open, so the lamp next to it is what it gets compared with.
-    let stripRoom = items.first { $0.kind == .strip }.map(roomOf)
-    for light in ready where light.kind != .remote && roomOf(light) == stripRoom { paint(light, c) }
+    // The strips' rooms, whichever tab is open, so the lamps next to them are what they get compared with.
+    let stripRooms = Set(items.filter { $0.kind == .strip }.map(roomOf))
+    for light in ready where light.kind != .remote && stripRooms.contains(roomOf(light)) { paint(light, c) }
   }
 
   func setStripBalance(_ balance: [Double], resend c: RGB) {
     strip.balance = balance
     // Instant, so slider moves show right away.
-    if ready.contains(where: { $0.kind == .strip }) { strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
+    for s in ready.compactMap(stripUUID) { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
   }
 
   func setBulbEffect(_ id: String, _ effect: String) {
@@ -470,18 +668,140 @@ final class Room {
   }
 
   func apply(_ m: Mood) {
-    stopEffect()
-    sweep(roomReady.filter { $0.kind != .remote }) { [weak self] light in
+    // Tapping the scene that's already on reshuffles which light gets which color (Hue does the same).
+    shuffle = mood == m.id ? shuffle + 1 : 0
+    stopEffect(on: roomReady)
+    let lights = roomReady.filter { $0.kind != .remote }
+    let order = mapOrder(lights)
+    let shift = shuffle
+    sweep(lights) { [weak self] light in
       guard let self else { return }
+      if case .snapshot(let snaps) = m.look {
+        // Lights added after the scene was saved stay as they are.
+        guard let snap = snaps[light.id] else { return }
+        guard snap.on else { return self.power(light, false) }
+        self.brightness(light, snap.brightness)
+        if let k = snap.kelvin { self.white(light, k) } else { self.paint(light, snap.color) }
+        return
+      }
       self.brightness(light, m.brightness)
       switch m.look {
       case .color(let c): self.paint(light, c)
       case .white(let k): self.white(light, k)
       case .party: self.paint(light, RGB(r: 255, g: 0, b: 180))
+      case .palette(let colors): self.paintPalette(light, colors, order, shift)
+      case .snapshot: break
       }
     }
-    if case .party = m.look, roomReady.contains(where: { $0.kind == .strip }) { start(.pattern(10)) }
+    // Party switches colors on the strip; with Reduce flashing it rolls a smooth rainbow instead.
+    if case .party = m.look { start(reduceFlashing ? .synced : .pattern(10), on: Self.all) }
     mood = m.id
+    startLiving(m)
+  }
+
+  private var shuffle = 0
+
+  /// Palette colors go around the room in map order, so neighbors differ. Unplaced lights keep list order.
+  private func mapOrder(_ lights: [LightItem]) -> [String: Int] {
+    let angle = { (l: LightItem) in self.placements[l.id].map { atan2($0.y, $0.x) } ?? .infinity }
+    return Dictionary(uniqueKeysWithValues: lights.sorted { angle($0) < angle($1) }.enumerated().map { ($1.id, $0) })
+  }
+
+  private func paintPalette(_ light: LightItem, _ colors: [RGB], _ order: [String: Int], _ shift: Int) {
+    let c = colors[((order[light.id] ?? 0) + shift) % colors.count]
+    paint(light, light.kind == .strip ? c.vivid : c)
+  }
+
+  // MARK: Living scenes
+
+  /// Color scenes keep moving: every few seconds each light hands its color to the next, and strips fade
+  /// between them. Runs while the app is open; any manual change stops it.
+  var living = UserDefaults.standard.bool(forKey: "livingScenes") {
+    didSet {
+      UserDefaults.standard.set(living, forKey: "livingScenes")
+      if let id = mood, let m = moods.first(where: { $0.id == id }) { startLiving(m) } else { livingTimer?.invalidate() }
+    }
+  }
+  private var livingTimer: Timer?
+  static let livingStep = 12.0
+
+  private func startLiving(_ m: Mood) {
+    livingTimer?.invalidate()
+    guard living, case .palette(let colors) = m.look, colors.count > 1 else { return }
+    livingTimer = Timer.scheduledTimer(withTimeInterval: Self.livingStep, repeats: true) { [weak self] timer in
+      MainActor.assumeIsolated {
+        guard let self, self.mood == m.id, self.living else { return timer.invalidate() }
+        self.shuffle += 1
+        // Same order as when the scene was applied, so every light steps to its neighbor's color.
+        let lights = self.roomReady.filter { $0.kind != .remote }
+        let order = self.mapOrder(lights)
+        for light in lights where light.on { self.paintPalette(light, colors, order, self.shuffle) }
+      }
+    }
+  }
+
+  // MARK: Your scenes
+
+  private(set) var customScenes: [Mood] = {
+    guard let data = UserDefaults.standard.data(forKey: "customScenes") else { return [] }
+    return (try? JSONDecoder().decode([Mood].self, from: data)) ?? []
+  }()
+  private(set) var favorites = Set(UserDefaults.standard.stringArray(forKey: "favoriteScenes") ?? [])
+
+  /// Yours first, then the built-in ones.
+  var moods: [Mood] { customScenes + Mood.all }
+
+  /// Saves every light in the room as it is right now.
+  func saveScene(named name: String) {
+    let lights = roomReady.filter { $0.kind != .remote }
+    guard !lights.isEmpty else { return }
+    let snaps = Dictionary(uniqueKeysWithValues: lights.map {
+      ($0.id, Mood.Snap(color: $0.color, kelvin: $0.kelvin, brightness: $0.brightness, on: $0.on))
+    })
+    let level = lights.filter(\.on).map(\.brightness).max() ?? 0
+    addScene(Mood(uniqueName(name), .mine, .snapshot(snaps), level))
+  }
+
+  /// Saves a palette (from a photo) as one of your scenes and plays it.
+  func savePalette(_ colors: [RGB], named name: String) {
+    guard !colors.isEmpty else { return }
+    let m = Mood(uniqueName(name), .mine, .palette(colors), 70)
+    addScene(m)
+    apply(m)
+  }
+
+  func deleteScene(_ id: String) {
+    customScenes.removeAll { $0.id == id }
+    favorites.remove(id)
+    saveScenes()
+  }
+
+  func toggleFavorite(_ id: String) {
+    if favorites.contains(id) { favorites.remove(id) } else { favorites.insert(id) }
+    saveScenes()
+  }
+
+  private func addScene(_ m: Mood) {
+    customScenes.insert(m, at: 0)
+    saveScenes()
+  }
+
+  /// "Movie" → "Movie 2" when the name is taken, so ids stay unique.
+  private func uniqueName(_ name: String) -> String {
+    let base = name.trimmingCharacters(in: .whitespaces).isEmpty ? "My scene" : name.trimmingCharacters(in: .whitespaces)
+    let taken = Set(moods.map(\.id))
+    var candidate = base
+    var n = 2
+    while taken.contains(candidate) {
+      candidate = "\(base) \(n)"
+      n += 1
+    }
+    return candidate
+  }
+
+  private func saveScenes() {
+    UserDefaults.standard.set(try? JSONEncoder().encode(customScenes), forKey: "customScenes")
+    UserDefaults.standard.set(Array(favorites), forKey: "favoriteScenes")
   }
 
   // MARK: Placement and sweeps
@@ -593,7 +913,7 @@ final class Room {
   func scanPower(_ id: String, _ on: Bool) {
     guard let light = item(id) else { return }
     switch light.kind {
-    case .strip: strip.setPower(on)
+    case .strip: stripUUID(light).map { strip.setPower($0, on) }
     case .bulb: hub(light).map { hubspace.setPower($0, on) }
     case .bleBulb: lamp(light).map { lamps.setPower($0, on) }
     case .remote: break
@@ -617,11 +937,10 @@ final class Room {
         if let k = light.kelvin { white(light, k) } else { paint(light, light.color) }
       } else {
         scanPower(light.id, false)
-        if light.kind == .strip { stripLook.on = false }
+        stripUUID(light).map { s in updateLook(s) { $0.on = false } }
       }
     }
     scanSaved = []
-    saveStrip()
   }
 
   private func targets(_ id: String) -> [LightItem] {
@@ -644,10 +963,10 @@ final class Room {
   private func brightness(_ light: LightItem, _ value: Int) {
     switch light.kind {
     case .strip:
-      wakeStrip()
-      strip.setBrightness(value)
-      stripLook.brightness = value
-      saveStrip()
+      guard let s = stripUUID(light) else { break }
+      wakeStrip(s)
+      strip.setBrightness(s, value)
+      updateLook(s) { $0.brightness = value }
     case .bulb: hub(light).map { hubspace.setBrightness($0, value) }
     case .bleBulb: lamp(light).map { lamps.setBrightness($0, value) }
     case .remote: break
@@ -657,11 +976,13 @@ final class Room {
   private func paint(_ light: LightItem, _ c: RGB) {
     switch light.kind {
     case .strip:
-      wakeStrip()
-      strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b))
-      stripLook.color = c
-      stripLook.kelvin = nil
-      saveStrip()
+      guard let s = stripUUID(light) else { break }
+      wakeStrip(s)
+      strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b))
+      updateLook(s) {
+        $0.color = c
+        $0.kelvin = nil
+      }
     case .bulb: hub(light).map { hubspace.setColor($0, r: c.r, g: c.g, b: c.b) }
     case .bleBulb: lamp(light).map { lamps.setColor($0, c) }
     case .remote: break
@@ -672,11 +993,11 @@ final class Room {
     switch light.kind {
     case .strip:
       // RGB-only strip: fake the temperature.
+      guard let s = stripUUID(light) else { break }
       let c = RGB.kelvin(kelvin)
-      wakeStrip()
-      strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b))
-      stripLook.kelvin = kelvin
-      saveStrip()
+      wakeStrip(s)
+      strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b))
+      updateLook(s) { $0.kelvin = kelvin }
     case .bulb: hub(light).map { hubspace.setWhite($0, kelvin: kelvin) }
     case .bleBulb: lamp(light).map { lamps.setWhite($0, kelvin) }
     case .remote: break
@@ -684,31 +1005,63 @@ final class Room {
   }
 
   /// Changing a look turns the strip on, like the bulb does on its own.
-  private func wakeStrip() {
-    guard !stripLook.on else { return }
-    strip.setPower(true)
-    stripLook.on = true
+  private func wakeStrip(_ id: UUID) {
+    guard stripLooks[id]?.on != true else { return }
+    strip.setPower(id, true)
+    updateLook(id) { $0.on = true }
   }
 
-  private struct SavedLook: Codable { var on: Bool; var brightness: Int; var color: RGB; var kelvin: Int? }
+  private struct SavedLook: Codable { var on = false; var brightness = 100; var color = RGB.white; var kelvin: Int? }
 
-  private func saveStrip() {
-    let saved = SavedLook(on: stripLook.on, brightness: stripLook.brightness, color: stripLook.color, kelvin: stripLook.kelvin)
-    UserDefaults.standard.set(try? JSONEncoder().encode(saved), forKey: "stripLook")
+  private func updateLook(_ id: UUID, _ change: (inout SavedLook) -> Void) {
+    change(&stripLooks[id, default: SavedLook()])
+    saveStrips()
   }
 
-  // MARK: Effects (strip only: the bulb goes through Home Depot's cloud, too slow to follow a beat)
+  private func saveStrips() {
+    let saved = Dictionary(uniqueKeysWithValues: stripLooks.map { ($0.key.uuidString, $0.value) })
+    UserDefaults.standard.set(try? JSONEncoder().encode(saved), forKey: "stripLooks")
+  }
 
-  func start(_ e: Effect) {
+  // MARK: Effects (strips only: the bulb goes through Home Depot's cloud, too slow to follow a beat)
+
+  /// The effect playing on this light, or on any strip in the room for `Room.all`.
+  func effectPlaying(on id: String) -> Effect? {
+    let playing = targets(id).contains { light in stripUUID(light).map { effectStrips.contains($0) } ?? false }
+    return playing ? effect : nil
+  }
+
+  /// Starts an effect on one strip, or on every connected strip in the room for `Room.all`.
+  func start(_ e: Effect, on id: String) {
+    let strips = targets(id).compactMap(stripUUID)
     stopEffect()
     effectError = nil
-    guard strip.state == .connected else { return }
-    wakeStrip()
+    guard !strips.isEmpty else { return }
+    for s in strips { wakeStrip(s) }
     mood = nil
     effect = e
+    effectStrips = Set(strips)
     switch e {
-    case .pattern(let id):
-      strip.setPattern(id)
+    case .pattern(let p):
+      for s in strips {
+        strip.setPattern(s, p)
+        strip.setSpeed(s, speed)
+      }
+    case .synced:
+      // Each controller runs built-in effects on its own clock, so two strips drift apart. One clock in the app keeps them together.
+      syncTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        MainActor.assumeIsolated { self?.syncStep() }
+      }
+    case .candle, .fire:
+      // Full brightness once; the flicker lives in the color, so each frame is one write per strip.
+      for s in strips {
+        strip.setBrightness(s, 100)
+        updateLook(s) { $0.brightness = 100 }
+      }
+      flameLevels = [:]
+      syncTimer = Timer.scheduledTimer(withTimeInterval: e == .fire ? 0.09 : 0.14, repeats: true) { [weak self] _ in
+        MainActor.assumeIsolated { self?.flameStep() }
+      }
     case .phoneMic:
       Task {
         guard await AVAudioApplication.requestRecordPermission() else {
@@ -725,8 +1078,49 @@ final class Room {
     }
   }
 
+  /// Takes these lights out of the running effect; the effect ends when no strip is left in it.
+  private func stopEffect(on lights: [LightItem]) {
+    effectStrips.subtract(lights.compactMap(stripUUID))
+    if effectStrips.isEmpty { stopEffect() }
+  }
+
+  /// Effect speed, 1–100: the built-in effects' speed command, and how fast the synced rainbow turns.
+  private(set) var speed = UserDefaults.standard.object(forKey: "stripSpeed") as? Int ?? 50
+  private var syncTimer: Timer?
+
+  func setSpeed(_ value: Int) {
+    speed = max(1, min(100, value))
+    UserDefaults.standard.set(speed, forKey: "stripSpeed")
+    if case .pattern = effect { for s in effectStrips { strip.setSpeed(s, speed) } }
+  }
+
+  /// One step of the synced rainbow: every strip gets the same color at the same moment. A full turn takes 60 s at
+  /// speed 1 and about 3 s at 100.
+  private func syncStep() {
+    guard effect == .synced else { return }
+    hue += 0.1 / (60 - Double(speed - 1) * 57 / 99)
+    let c = RGB.hue(hue)
+    for s in effectStrips { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false) }
+  }
+
+  private var flameLevels: [UUID: Double] = [:]
+
+  /// Each strip flickers on its own, so two strips look like two flames, not one copied.
+  private func flameStep() {
+    guard effect == .candle || effect == .fire else { return }
+    for s in effectStrips {
+      let (c, level) = Effect.flame(fire: effect == .fire, level: flameLevels[s] ?? 0.7,
+                                    roll: Double.random(in: 0...1), hueRoll: Double.random(in: 0...1))
+      flameLevels[s] = level
+      strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false)
+    }
+  }
+
   /// Forgets the running effect. The strip leaves a built-in effect on its next color.
   func stopEffect() {
+    syncTimer?.invalidate()
+    syncTimer = nil
+    effectStrips = []
     if let engine {
       engine.inputNode.removeTap(onBus: 0)
       engine.stop()
@@ -761,14 +1155,25 @@ final class Room {
     guard effect == .phoneMic else { return }
     let db = 20 * log10(max(rms, 1e-6))
     let loud = max(0, min(1, (db + 55) / 45))
-    level = max(loud, level * 0.8)
+    // Reduce flashing: brightness falls slowly and never below 40 %, and colors fade at most every 1.5 s.
+    let gentle = reduceFlashing
+    level = max(loud, level * (gentle ? 0.96 : 0.8))
     average = average * 0.95 + loud * 0.05
-    if loud > average + 0.15, loud > 0.3, Date().timeIntervalSince(lastBeat) > 0.25 {
+    if loud > average + 0.15, loud > 0.3, Date().timeIntervalSince(lastBeat) > (gentle ? 1.5 : 0.25) {
       lastBeat = Date()
       hue += 0.13
       let c = RGB.hue(hue)
-      strip.setColor(r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: false)
+      for s in effectStrips { strip.setColor(s, r: UInt8(c.r), g: UInt8(c.g), b: UInt8(c.b), fade: gentle) }
     }
-    strip.setBrightness(Int(8 + level * 92))
+    let floor = gentle ? 40.0 : 8.0
+    for s in effectStrips { strip.setBrightness(s, Int(floor + level * (100 - floor))) }
   }
+
+  /// Hides blink, flash and strobe effects and calms music mode, for anyone sensitive to flashing light.
+  var reduceFlashing = UserDefaults.standard.bool(forKey: "reduceFlashing") {
+    didSet { UserDefaults.standard.set(reduceFlashing, forKey: "reduceFlashing") }
+  }
+
+  /// Effect groups that flash: blink, flash and strobe.
+  static let flashingGroups: Set<String> = ["Blink", "Flash", "Strobe"]
 }

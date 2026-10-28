@@ -1,17 +1,44 @@
 import ARKit
+import PhotosUI
 import SwiftUI
 import UIKit
 
-// Design: black canvas, flat cards, and each light's own color as the only accent.
+// Design, "night room": a near-black canvas, cards with a hairline edge, and the lights' own colors as the
+// accent. Lit tiles carry a tint of their color, and the background glows with whatever is on.
 // Layout follows the Hubspace light screen (mode circles, brightness bar, presets, wheel)
 // with DayBetter's patterns and music on top.
 private enum Ink {
-  static let bg = Color.black
-  static let card = Color(hex: 0x141416)
-  static let raised = Color(hex: 0x232328)
+  static let bg = Color(hex: 0x07070B)
+  static let card = Color(hex: 0x121218)
+  static let raised = Color(hex: 0x1F1F27)
+  /// Card edge: light enough to separate a card from the canvas, quiet enough to disappear.
+  static let line = Color.white.opacity(0.07)
   static let text = Color(hex: 0xF5F5F7)
-  static let dim = Color(hex: 0x8E8E93)
+  /// Secondary text: 7.3:1 on cards, 6.4:1 on raised fills (WCAG AA needs 4.5).
+  static let dim = Color(hex: 0xA1A1AA)
   static let bad = Color(hex: 0xFF6B5E)
+  /// The app icon's strip, warm to cool. Only for the wordmark.
+  static let brand = [Color(hex: 0xFF7A30), Color(hex: 0xFF2D78), Color(hex: 0xC56BFF), Color(hex: 0x6E9BFF), Color(hex: 0x00D9FF)]
+}
+
+/// A card: the base surface for rows and panels. `tint` washes it with a light's color while it's on.
+private struct Card: ViewModifier {
+  var tint: Color?
+  var radius: CGFloat = 24
+
+  func body(content: Content) -> some View {
+    let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+    content.background(
+      shape.fill(Ink.card)
+        // 12 %: secondary text stays above 5:1 even on a tile lit pure white.
+        .overlay(shape.fill(LinearGradient(colors: [(tint ?? .clear).opacity(0.12), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)))
+        .overlay(shape.strokeBorder(tint.map { $0.opacity(0.22) } ?? Ink.line, lineWidth: 1))
+    )
+  }
+}
+
+extension View {
+  fileprivate func card(tint: Color? = nil, radius: CGFloat = 24) -> some View { modifier(Card(tint: tint, radius: radius)) }
 }
 
 /// Pressed state for every custom button: a slight shrink and dim on a spring, so taps feel answered
@@ -22,16 +49,19 @@ private struct Press: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
       .contentShape(Rectangle())
-      .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
-      .opacity(configuration.isPressed ? 0.8 : 1)
-      .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+      .scaleEffect(configuration.isPressed && !reduceMotion ? 0.97 : 1)
+      .opacity(configuration.isPressed ? 0.85 : 1)
+      // Quick in, settle out: the press answers at once, the release eases back.
+      .animation(reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.22, dampingFraction: 0.75), value: configuration.isPressed)
   }
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log
+  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log, automations, walkIn
   var id: String {
     switch self {
+    case .walkIn: "walkIn"
+    case .automations: "automations"
     case .light(let id): "light-" + id
     case .stripSetup: "strip"
     case .hubSetup: "hub"
@@ -53,7 +83,15 @@ struct ContentView: View {
   @State private var removing: LightItem?
   @State private var deletingRoom: String?
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.scenePhase) private var scenePhase
   @State private var roomName = ""
+  @State private var savingScene = false
+  @State private var sceneName = ""
+  @State private var photo: PhotosPickerItem?
+  @State private var photoError = false
+  /// The scene group on show; nil opens on the first one (Favorites if you have some).
+  @SceneStorage("sceneGroup") private var sceneGroup: String?
+  @Namespace private var tabs
 
   private enum RoomEdit: Equatable { case add, rename(String) }
 
@@ -76,10 +114,30 @@ struct ContentView: View {
         .padding(.top, 16)
         ForEach(room.inRoom) { item in row(item) }
         if room.inRoom.isEmpty {
-          Text("Nothing in \(room.currentRoom) yet. Tap Add, or move a device here from its settings.")
-            .font(.subheadline)
-            .foregroundStyle(Ink.dim)
-            .frame(maxWidth: .infinity, alignment: .leading)
+          VStack(spacing: 16) {
+            Image(systemName: "light.strip.2")
+              .font(.system(size: 28, weight: .medium))
+              .foregroundStyle(LinearGradient(colors: Ink.brand, startPoint: .leading, endPoint: .trailing))
+            VStack(spacing: 4) {
+              Text("Nothing in \(room.currentRoom) yet").font(.headline)
+              Text("Add a light, or move one here from its settings.")
+                .font(.subheadline)
+                .foregroundStyle(Ink.dim)
+                .multilineTextAlignment(.center)
+            }
+            Button { sheet = .add } label: {
+              Text("Add a light")
+                .font(.body.weight(.semibold))
+                .padding(.horizontal, 24)
+                .frame(minHeight: 48)
+                .foregroundStyle(.black)
+                .background(Capsule().fill(Ink.text))
+            }
+            .buttonStyle(Press())
+          }
+          .frame(maxWidth: .infinity)
+          .padding(24)
+          .card()
         }
         Text("Swipe left on a device to remove it.")
           .font(.footnote)
@@ -92,6 +150,11 @@ struct ContentView: View {
       .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
     }
     .listStyle(.plain)
+    // Pull down to reconnect anything that dropped and re-read the bulbs.
+    .refreshable { await room.reconnect() }
+    .onChange(of: scenePhase, initial: true) { _, phase in
+      if phase == .active { room.walkIn.appOpenedAt = Date() }
+    }
     .scrollContentBackground(.hidden)
     .scrollIndicators(.hidden)
     .background(glow)
@@ -121,10 +184,13 @@ struct ContentView: View {
           }
         }
         case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
+        case .automations: AutomationsSheet()
+        case .walkIn: WalkInSheet(room: room)
         }
       }
       .presentationDragIndicator(.visible)
       .presentationBackground(Ink.card)
+      .presentationCornerRadius(32)
       .preferredColorScheme(.dark)
     }
     .confirmationDialog("Remove \(removing?.name ?? "this device")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
@@ -163,13 +229,22 @@ struct ContentView: View {
       HStack(spacing: 8) {
         ForEach(room.rooms, id: \.self) { name in
           let selected = room.currentRoom == name
-          Button { room.selectedRoom = name } label: {
+          Button {
+            withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.3, dampingFraction: 0.85)) { room.selectedRoom = name }
+          } label: {
             Text(name)
               .font(.subheadline.weight(.semibold))
               .padding(.horizontal, 16)
               .frame(minHeight: 44)
               .foregroundStyle(selected ? .black : Ink.text)
-              .background(Capsule().fill(selected ? Ink.text : Ink.raised))
+              .background {
+                // The selected pill slides between rooms instead of jumping.
+                if selected {
+                  Capsule().fill(Ink.text).matchedGeometryEffect(id: "roomTab", in: tabs)
+                } else {
+                  Capsule().fill(Ink.raised)
+                }
+              }
           }
           .buttonStyle(Press())
           .accessibilityAddTraits(selected ? .isSelected : [])
@@ -199,28 +274,39 @@ struct ContentView: View {
     .sensoryFeedback(.selection, trigger: room.currentRoom)
   }
 
+  /// The room's light spills onto the screen: a wide glow from the top, and a fainter pool at the bottom.
   private var glow: some View {
     ZStack {
       Ink.bg
       if let ambient = room.ambient {
-        RadialGradient(colors: [ambient.opacity(0.4), .clear], center: .top, startRadius: 0, endRadius: 480)
+        RadialGradient(colors: [ambient.opacity(0.42), ambient.opacity(0.08), .clear], center: .top, startRadius: 0, endRadius: 520)
+        RadialGradient(colors: [ambient.opacity(0.12), .clear], center: .bottom, startRadius: 0, endRadius: 420)
       }
     }
     .ignoresSafeArea()
-    .animation(reduceMotion ? nil : .easeOut(duration: 0.4), value: room.ambient)
+    // A color change in the room is worth a slow, soft crossfade; it's the mood, not a control.
+    .animation(.easeInOut(duration: 0.6), value: room.ambient)
   }
 
   private var header: some View {
     HStack(alignment: .center, spacing: 8) {
       VStack(alignment: .leading, spacing: 4) {
+        Text("DORM REMOTE")
+          .font(.caption2.weight(.heavy))
+          .tracking(2.5)
+          .foregroundStyle(LinearGradient(colors: Ink.brand, startPoint: .leading, endPoint: .trailing))
+          .accessibilityHidden(true)
         Text(room.currentRoom)
           .font(.system(.largeTitle, design: .rounded, weight: .bold))
+          .contentTransition(.opacity)
         Text(summary)
           .font(.subheadline)
           .foregroundStyle(Ink.dim)
       }
       Spacer()
       Menu {
+        Button("Walk in", systemImage: "figure.walk.arrival") { sheet = .walkIn }
+        Button("Schedules & automations", systemImage: "alarm") { sheet = .automations }
         Button("Find my lights", systemImage: "viewfinder") { sheet = .scan }
         Button("Room map", systemImage: "map") { sheet = .map }
         Button("Turn everything off", systemImage: "power") { room.setPower(Room.everything, false) }
@@ -234,6 +320,15 @@ struct ContentView: View {
           .foregroundStyle(Ink.dim)
       }
       .accessibilityLabel("More")
+      Button { sheet = .light(Room.all) } label: {
+        Image(systemName: "slider.horizontal.3")
+          .font(.system(size: 17, weight: .semibold))
+          .frame(width: 44, height: 44)
+          .background(Circle().fill(Ink.raised))
+      }
+      .buttonStyle(Press())
+      .disabled(room.roomReady.filter { $0.kind != .remote }.isEmpty)
+      .accessibilityLabel("Room controls")
       PowerButton(on: room.anyOn, tint: room.ambient ?? .white) {
         room.setPower(Room.all, !room.anyOn)
       }
@@ -250,31 +345,178 @@ struct ContentView: View {
 
   private var scenes: some View {
     VStack(alignment: .leading, spacing: 12) {
-      SectionTitle("Scenes")
+      HStack {
+        SectionTitle("Scenes")
+        Spacer()
+        Button { room.living.toggle() } label: {
+          Label("Living", systemImage: room.living ? "wind" : "pause.circle")
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 14)
+            .frame(minHeight: 44)
+            .foregroundStyle(room.living ? .black : Ink.text)
+            .background(Capsule().fill(room.living ? Ink.text : Ink.raised))
+        }
+        .buttonStyle(Press())
+        .accessibilityLabel("Living scenes")
+        .accessibilityValue(room.living ? "On" : "Off")
+        .accessibilityHint("Color scenes drift slowly from light to light")
+      }
+      // One row at a time, picked with chips: six stacked rows read as clutter (the "feature overload" reviewers
+      // hold against Govee's app). Opens on Favorites when there are some.
+      let groups = sceneGroups
+      let shown = groups.contains(sceneGroup ?? "") ? sceneGroup! : groups[0]
       ScrollView(.horizontal) {
-        HStack(spacing: 16) {
-          ForEach(Mood.all) { mood in
-            Button { room.apply(mood) } label: {
-              VStack(spacing: 8) {
-                Circle()
-                  .fill(AngularGradient(colors: mood.swatch + [mood.swatch[0]], center: .center))
-                  .frame(width: 60, height: 60)
-                  .padding(4)
-                  .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
-                Text(mood.id)
-                  .font(.caption.weight(.medium))
-                  .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
-              }
+        HStack(spacing: 8) {
+          ForEach(groups, id: \.self) { g in
+            Button {
+              withAnimation(.easeOut(duration: 0.2)) { sceneGroup = g }
+            } label: {
+              Text(g)
+                .font(.footnote.weight(.semibold))
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .foregroundStyle(shown == g ? Ink.text : Ink.dim)
+                .background(Capsule().fill(shown == g ? Ink.raised : .clear))
+                .overlay(Capsule().strokeBorder(shown == g ? Ink.line : .clear))
             }
             .buttonStyle(Press())
+            .accessibilityAddTraits(shown == g ? .isSelected : [])
           }
         }
       }
       .scrollIndicators(.hidden)
-      .disabled(room.roomReady.isEmpty)
-      .opacity(room.roomReady.isEmpty ? 0.4 : 1)
-      .sensoryFeedback(.selection, trigger: room.mood)
+      .sensoryFeedback(.selection, trigger: shown)
+      sceneRow(moods(in: shown), leading: shown == Mood.Group.mine.rawValue ? AnyView(HStack(alignment: .top, spacing: 16) { saveTile; photoTile }) : nil)
+        .id(shown)
+        .transition(.opacity)
+      Text("Tap a color scene again to shuffle its colors. Press and hold to favorite. Living makes color scenes drift while the app is open.")
+        .font(.footnote)
+        .foregroundStyle(Ink.dim)
     }
+    .disabled(room.roomReady.isEmpty)
+    .opacity(room.roomReady.isEmpty ? 0.4 : 1)
+    .sensoryFeedback(.selection, trigger: room.mood)
+    .alert("Save scene", isPresented: $savingScene) {
+      TextField("Name", text: $sceneName)
+      Button("Save") { room.saveScene(named: sceneName) }
+      Button("Cancel", role: .cancel) {}
+    } message: {
+      Text("Saves every light in \(room.currentRoom) the way it is now.")
+    }
+  }
+
+  private static let favoritesGroup = "Favorites"
+
+  /// Favorites (when there are any), Yours, then the built-in groups.
+  private var sceneGroups: [String] {
+    let favorites = room.favorites.isEmpty ? [] : [Self.favoritesGroup]
+    return favorites + Mood.Group.allCases.map(\.rawValue)
+  }
+
+  private func moods(in group: String) -> [Mood] {
+    if group == Self.favoritesGroup { return room.moods.filter { room.favorites.contains($0.id) } }
+    if group == Mood.Group.mine.rawValue { return room.customScenes }
+    return Mood.all.filter { $0.group.rawValue == group }
+  }
+
+  private func sceneRow(_ moods: [Mood], leading: AnyView? = nil) -> some View {
+    ScrollView(.horizontal) {
+      HStack(alignment: .top, spacing: 16) {
+        if let leading { leading }
+        ForEach(moods) { sceneTile($0) }
+      }
+    }
+    .scrollIndicators(.hidden)
+  }
+
+  private func sceneTile(_ mood: Mood) -> some View {
+    Button { room.apply(mood) } label: {
+      VStack(spacing: 8) {
+        Circle()
+          .fill(AngularGradient(colors: mood.swatch + [mood.swatch[0]], center: .center))
+          .frame(width: 60, height: 60)
+          .padding(4)
+          .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
+          .shadow(color: room.mood == mood.id ? mood.swatch[0].opacity(0.55) : .clear, radius: 12)
+          .animation(.easeOut(duration: 0.2), value: room.mood)
+          .overlay(alignment: .topTrailing) {
+            if room.favorites.contains(mood.id) {
+              Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.yellow)
+                .padding(4).background(Circle().fill(Ink.bg))
+            }
+          }
+        Text(mood.id)
+          .font(.caption.weight(.medium))
+          .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
+          .multilineTextAlignment(.center)
+          .lineLimit(2)
+          .frame(width: 72)
+      }
+    }
+    .buttonStyle(Press())
+    .accessibilityLabel("\(mood.id) scene")
+    .accessibilityAddTraits(room.mood == mood.id ? .isSelected : [])
+    .contextMenu {
+      let favorite = room.favorites.contains(mood.id)
+      Button(favorite ? "Remove from Favorites" : "Add to Favorites", systemImage: favorite ? "star.slash" : "star") {
+        room.toggleFavorite(mood.id)
+      }
+      if mood.group == .mine {
+        Button("Delete scene", systemImage: "trash", role: .destructive) { room.deleteScene(mood.id) }
+      }
+    }
+  }
+
+  /// The system photo picker needs no photo-library permission: the app only gets the one picture you choose.
+  private var photoTile: some View {
+    PhotosPicker(selection: $photo, matching: .images) {
+      VStack(spacing: 8) {
+        Image(systemName: "photo.on.rectangle.angled")
+          .font(.title3.weight(.semibold))
+          .frame(width: 60, height: 60)
+          .background(Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])))
+          .padding(4)
+        Text("From photo").font(.caption.weight(.medium)).foregroundStyle(Ink.dim).frame(width: 72)
+      }
+    }
+    .buttonStyle(Press())
+    .accessibilityLabel("Make a scene from a photo")
+    .onChange(of: photo) { _, item in
+      guard let item else { return }
+      Task {
+        let data = try? await item.loadTransferable(type: Data.self)
+        photo = nil
+        let colors = data.map { Mood.palette(from: Mood.pixels(ofImage: $0)) } ?? []
+        if colors.isEmpty {
+          photoError = true
+        } else {
+          room.savePalette(colors, named: "Photo")
+        }
+      }
+    }
+    .alert("No strong colors", isPresented: $photoError) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text("That photo is mostly gray or dark. Try one with bolder colors.")
+    }
+  }
+
+  private var saveTile: some View {
+    Button {
+      sceneName = ""
+      savingScene = true
+    } label: {
+      VStack(spacing: 8) {
+        Image(systemName: "plus")
+          .font(.title3.weight(.semibold))
+          .frame(width: 60, height: 60)
+          .background(Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])))
+          .padding(4)
+        Text("Save current").font(.caption.weight(.medium)).foregroundStyle(Ink.dim).frame(width: 72)
+      }
+    }
+    .buttonStyle(Press())
+    .accessibilityLabel("Save the room as a scene")
   }
 
   private func row(_ item: LightItem) -> some View {
@@ -357,6 +599,7 @@ private struct LightRow: View {
   var room: Room
   let item: LightItem
   let open: () -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     VStack(spacing: 16) {
@@ -393,11 +636,12 @@ private struct LightRow: View {
           label: "Brightness"
         )
         .frame(height: 44)
-        .transition(.opacity.combined(with: .move(edge: .top)))
+        // Reduce Motion: fade only, no slide.
+        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
       }
     }
     .padding(16)
-    .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.card))
+    .card(tint: item.status == .ready && item.on && !item.caps.contains(.remote) ? item.glow.color : nil)
     .opacity(item.kind == .remote && item.status != .ready ? 0.55 : 1)
     .contentShape(RoundedRectangle(cornerRadius: 24))
     .onTapGesture(perform: open)
@@ -412,9 +656,11 @@ private struct LightRow: View {
     case .ready:
       if item.caps.contains(.remote) { return "Tap for the remote" }
       guard item.on else { return "Off" }
-      if item.kind == .strip, let effect = room.effect { return effect.name }
+      if item.kind == .strip, let effect = room.effectPlaying(on: item.id) { return effect.name }
       if let effect = item.effect { return HubspaceClient.effectName(effect) }
-      return item.kelvin.map { "\($0)K white" } ?? "Color"
+      // "Purple · 60%": the color in words (no judging swatches) and the level at a glance.
+      let look = item.kelvin.map { $0 <= 3300 ? "Warm white" : $0 >= 5000 ? "Cool white" : "White" } ?? item.color.name
+      return "\(look) · \(item.brightness)%"
     case .setup: return item.kind == .remote ? "Needs the IR bridge" : "Tap to set up"
     case .busy(let s): return s + "…"
     case .offline(let s): return s
@@ -457,6 +703,8 @@ private struct PillSlider: View {
         value = min(range.upperBound, max(range.lowerBound, g.location.x / w))
       })
     }
+    // A light tick every 10 %, so you can feel the level without looking.
+    .sensoryFeedback(.selection, trigger: Int((value * 10).rounded()))
     .accessibilityElement()
     .accessibilityLabel(label)
     .accessibilityValue("\(Int(value * 100)) percent")
@@ -519,20 +767,31 @@ private struct LightSheet: View {
   @State private var newName = ""
   @Environment(\.dismiss) private var dismiss
 
+  /// Room controls: the same sheet, acting on every light in the room.
+  private var isRoom: Bool { id == Room.all }
+
+  /// For the room, Effects means strip effects, so it shows only when the room has a strip.
+  private func modeAvailable(_ m: Mode, _ item: LightItem) -> Bool {
+    guard isRoom else { return item.caps.contains(m.capability) }
+    return m != .effects || room.roomReady.contains { $0.kind == .strip }
+  }
+
+  // Fully saturated, one hue step apart, so each reads as its own color on an LED instead of drifting to white.
   private static let swatches: [RGB] = [
-    RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 0, b: 200), RGB(r: 130, g: 0, b: 255), RGB(r: 0, g: 40, b: 255),
-    RGB(r: 0, g: 230, b: 255), RGB(r: 60, g: 255, b: 60), RGB(r: 255, g: 240, b: 0), RGB(r: 255, g: 100, b: 20),
+    RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 90, b: 0), RGB(r: 255, g: 160, b: 0), RGB(r: 255, g: 230, b: 0),
+    RGB(r: 157, g: 255, b: 0), RGB(r: 0, g: 255, b: 64), RGB(r: 0, g: 255, b: 192), RGB(r: 0, g: 217, b: 255),
+    RGB(r: 0, g: 40, b: 255), RGB(r: 122, g: 0, b: 255), RGB(r: 255, g: 0, b: 225), RGB(r: 255, g: 45, b: 120),
   ]
-  private static let swatchNames = ["Red", "Pink", "Purple", "Blue", "Cyan", "Green", "Yellow", "Orange"]
+  private static let swatchNames = ["Red", "Orange", "Amber", "Yellow", "Lime", "Green", "Teal", "Cyan", "Blue", "Violet", "Magenta", "Pink"]
   private static let temperatures = [2200, 2700, 4000, 5000, 6500]
 
   var body: some View {
-    if let item = room.item(id) {
+    if let item = isRoom ? room.look(id) : room.item(id) {
       ScrollView {
         VStack(alignment: .leading, spacing: 28) {
           HStack(spacing: 16) {
             Orb(item: item, size: 44)
-            Text(item.name)
+            Text(isRoom ? room.currentRoom : item.name)
               .font(.system(.title, design: .rounded, weight: .bold))
               .lineLimit(1)
             Spacer()
@@ -559,22 +818,26 @@ private struct LightSheet: View {
           case .white: whiteControls(item)
           case .color: colorControls(item)
           case .effects:
-            if item.kind == .strip { stripEffects } else { bulbEffects(item) }
+            if isRoom || item.kind == .strip { stripEffects } else { bulbEffects(item) }
           }
 
-          if item.kind == .bulb {
+          if !isRoom, item.kind == .bulb {
             Text("The bulb takes commands through Hubspace's cloud, so it has to be on Wi-Fi. Changes can take a second.")
               .font(.footnote)
               .foregroundStyle(Ink.dim)
           }
 
-          footer(item)
+          if isRoom {
+            Text("Changes here go to every light in \(room.currentRoom).").font(.footnote).foregroundStyle(Ink.dim)
+          } else {
+            footer(item)
+          }
         }
         .padding(24)
         .padding(.top, 8)
       }
       .onAppear {
-        let inEffect = item.kind == .strip ? room.effect != nil : item.effect != nil
+        let inEffect = item.kind == .strip ? room.effectPlaying(on: id) != nil : item.effect != nil
         mode = inEffect ? .effects : item.kelvin != nil ? .white : .color
       }
       .sheet(isPresented: $matching) {
@@ -596,7 +859,7 @@ private struct LightSheet: View {
 
   private func modePicker(_ item: LightItem) -> some View {
     return HStack(spacing: 0) {
-      ForEach(Mode.allCases.filter { item.caps.contains($0.capability) }, id: \.self) { m in
+      ForEach(Mode.allCases.filter { modeAvailable($0, item) }, id: \.self) { m in
         Button { mode = m } label: {
           VStack(spacing: 8) {
             modeCircle(m)
@@ -679,7 +942,28 @@ private struct LightSheet: View {
           .accessibilityLabel(Self.swatchNames[i])
         }
       }
-      ColorWheel(selected: item.kelvin == nil ? item.color : nil) { room.setColor(id, $0) }
+      if !room.recentColors.isEmpty {
+        Label("Recent", systemImage: "clock")
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(Ink.dim)
+        ScrollView(.horizontal) {
+          HStack(spacing: 12) {
+            ForEach(Array(room.recentColors.enumerated()), id: \.offset) { _, c in
+              Button { room.setColor(id, c) } label: {
+                Circle()
+                  .fill(c.color)
+                  .frame(width: 44, height: 44)
+                  .padding(4)
+                  .overlay(Circle().strokeBorder(Ink.text, lineWidth: item.kelvin == nil && item.color == c ? 2 : 0))
+              }
+              .buttonStyle(Press())
+              .accessibilityLabel("Recent color")
+            }
+          }
+        }
+        .scrollIndicators(.hidden)
+      }
+      ColorWheel(selected: item.kelvin == nil ? item.color : nil, pick: { room.setColor(id, $0) }, done: { room.remember($0) })
         .padding(.horizontal, 24)
     }
   }
@@ -702,17 +986,29 @@ private struct LightSheet: View {
 
   private var stripEffects: some View {
     VStack(alignment: .leading, spacing: 20) {
-      ForEach(Effect.patternGroups, id: \.0) { group in
+      if let playing = room.effectPlaying(on: id), playing != .phoneMic, playing != .candle, playing != .fire {
+        speedSlider(Double(room.speed - 1) / 99) { room.setSpeed(1 + Int(($0 * 99).rounded())) }
+      }
+      heading("Cozy", "flame")
+      LazyVGrid(columns: Self.twoColumns, spacing: 12) {
+        effectCard("Candlelight", colors: [Color(hex: 0xFF8C1A), Color(hex: 0xFFB347), Color(hex: 0x7A3A00)],
+                   active: room.effectPlaying(on: id) == .candle) { room.start(.candle, on: id) }
+        effectCard("Fireplace", colors: [Color(hex: 0xFF3B00), Color(hex: 0xFF8A00), Color(hex: 0x5A1400)],
+                   active: room.effectPlaying(on: id) == .fire) { room.start(.fire, on: id) }
+      }
+      heading("In sync", "link")
+      effectCard("Rainbow in sync", colors: Effect.rainbow.map(\.color), active: room.effectPlaying(on: id) == .synced) { room.start(.synced, on: id) }
+      ForEach(Effect.patternGroups.filter { !room.reduceFlashing || !Room.flashingGroups.contains($0.0) }, id: \.0) { group in
         heading(group.0, "sparkles")
         LazyVGrid(columns: Self.twoColumns, spacing: 12) {
           ForEach(group.1) { p in
-            effectCard(p.name, colors: p.colors.map(\.color), active: room.effect == .pattern(p.id)) { room.start(.pattern(p.id)) }
+            effectCard(p.name, colors: p.colors.map(\.color), active: room.effectPlaying(on: id) == .pattern(p.id)) { room.start(.pattern(p.id), on: id) }
           }
         }
       }
       heading("Music", "waveform")
-      effectCard("Pulse to music (phone mic)", colors: [.pink, .purple, .cyan], active: room.effect == .phoneMic) { room.start(.phoneMic) }
-      if room.effect == .phoneMic {
+      effectCard("Pulse to music (phone mic)", colors: [.pink, .purple, .cyan], active: room.effectPlaying(on: id) == .phoneMic) { room.start(.phoneMic, on: id) }
+      if room.effectPlaying(on: id) == .phoneMic {
         Capsule()
           .fill(Ink.raised)
           .overlay(alignment: .leading) {
@@ -721,12 +1017,21 @@ private struct LightSheet: View {
           .frame(height: 6)
           .animation(.linear(duration: 0.05), value: room.level)
       }
-      Text("Effects run on the strip itself and keep going when you close the app. Music mode listens through your phone while the app is open.")
+      Text("Built-in effects run on each strip and keep going when you close the app, but two strips drift apart over time. \"Rainbow in sync\" and music mode run from your phone, so they stay together while the app is open.")
         .font(.footnote)
         .foregroundStyle(Ink.dim)
       if let error = room.effectError {
         Text(error).font(.footnote).foregroundStyle(Ink.bad)
       }
+      Toggle(isOn: Binding(get: { room.reduceFlashing }, set: { room.reduceFlashing = $0 })) {
+        VStack(alignment: .leading, spacing: 2) {
+          Text("Reduce flashing").font(.subheadline.weight(.semibold))
+          Text("Hides blink, flash and strobe effects, and keeps music mode and Party smooth.")
+            .font(.footnote)
+            .foregroundStyle(Ink.dim)
+        }
+      }
+      .frame(minHeight: 44)
     }
   }
 
@@ -771,10 +1076,14 @@ private struct LightSheet: View {
       }
       .padding(.horizontal, 14)
       .frame(maxWidth: .infinity, minHeight: 56)
-      .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(active ? Ink.text.opacity(0.14) : Ink.raised))
-      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Ink.text.opacity(active ? 0.9 : 0), lineWidth: 1.5))
+      // The running effect lights up in its own colors.
+      .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(active ? colors[0].opacity(0.18) : Ink.raised))
+      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(active ? colors[0].opacity(0.9) : Ink.line, lineWidth: active ? 1.5 : 1))
+      .shadow(color: active ? colors[0].opacity(0.35) : .clear, radius: 10)
+      .animation(.easeOut(duration: 0.2), value: active)
     }
     .buttonStyle(Press())
+    .sensoryFeedback(.selection, trigger: active)
     .accessibilityAddTraits(active ? .isSelected : [])
   }
 
@@ -899,6 +1208,8 @@ private struct MatchSheet: View {
 private struct ColorWheel: View {
   let selected: RGB?
   let pick: (RGB) -> Void
+  /// The color where the finger lifted, for the Recent row.
+  var done: (RGB) -> Void = { _ in }
 
   var body: some View {
     GeometryReader { geo in
@@ -919,14 +1230,18 @@ private struct ColorWheel: View {
       .frame(width: r * 2, height: r * 2)
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .contentShape(Circle())
-      .gesture(DragGesture(minimumDistance: 0).onChanged { g in
-        let dx = g.location.x - geo.size.width / 2, dy = g.location.y - geo.size.height / 2
-        let angle = atan2(dy, dx)
-        pick(RGB.hue(angle / (2 * .pi), saturation: min(1, (dx * dx + dy * dy).squareRoot() / r)))
-      })
+      .gesture(DragGesture(minimumDistance: 0)
+        .onChanged { g in pick(color(at: g.location, in: geo.size, r: r)) }
+        .onEnded { g in done(color(at: g.location, in: geo.size, r: r)) })
     }
     .aspectRatio(1, contentMode: .fit)
     .accessibilityLabel("Color wheel")
+    .accessibilityValue(selected?.name ?? "No color picked")
+  }
+
+  private func color(at p: CGPoint, in size: CGSize, r: CGFloat) -> RGB {
+    let dx = p.x - size.width / 2, dy = p.y - size.height / 2
+    return RGB.hue(atan2(dy, dx) / (2 * .pi), saturation: min(1, (dx * dx + dy * dy).squareRoot() / r))
   }
 }
 
@@ -935,37 +1250,67 @@ private struct ColorWheel: View {
 private struct StripSetup: View {
   var strip: StripController
   @State private var showOthers = false
+  /// Nothing turned up after a few seconds: show the fixes.
+  @State private var slowSearch = false
   @Environment(\.dismiss) private var dismiss
 
+  // DayBetter FAQ (daybetter.net) and what the app itself needs.
+  private static let tips = [
+    "Swipe the DayBetter app away in the app switcher. A strip talks to one app at a time.",
+    "Unplug the strip's power for 10 seconds, then plug it back in.",
+    "Turn Bluetooth off and on in Control Center.",
+    "Move closer. The controller box is the part with the antenna.",
+    "Strips you've already added stay connected and don't show up here. Check the Lights list.",
+    "Some controllers use other names: open \"Show all Bluetooth devices\" below.",
+  ]
+
   var body: some View {
-    let strips = strip.devices.filter { Daybetter.looksLikeStrip($0.name) }
-    let others = strip.devices.filter { !Daybetter.looksLikeStrip($0.name) }
+    let isStrip = { (d: FoundDevice) in d.daybetter || Daybetter.looksLikeStrip(d.name) }
+    let strips = strip.devices.filter(isStrip)
+    let others = strip.devices.filter { !isStrip($0) }
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Add your LED strip").font(.system(.title, design: .rounded, weight: .bold))
-          Text("Close the DayBetter app first. The strip only talks to one app at a time.")
+          Text(strip.strips.isEmpty ? "Add your LED strip" : "Add another LED strip").font(.system(.title, design: .rounded, weight: .bold))
+          Text("Close the DayBetter app first. The strip only talks to one app at a time. Strips you've already added stay connected and aren't listed.")
             .foregroundStyle(Ink.dim)
         }
 
-        switch strip.state {
-        case .connecting, .unlocking:
+        if !strip.bluetoothOn {
+          Text("Turn on Bluetooth.").foregroundStyle(Ink.dim)
+        } else if case .failed(let message) = strip.adding?.state {
+          Text(message).foregroundStyle(Ink.bad)
+          Button("Try again") {
+            strip.cancelAdding()
+            strip.scan()
+          }
+          .frame(minHeight: 44)
+        } else if strip.adding != nil {
           HStack(spacing: 12) {
             ProgressView()
             Text("Connecting…").foregroundStyle(Ink.dim)
             Spacer()
-            Button("Cancel") { strip.cancelConnecting() }.frame(minHeight: 44)
+            Button("Cancel") { strip.cancelAdding() }.frame(minHeight: 44)
           }
-        case .off:
-          Text("Turn on Bluetooth.").foregroundStyle(Ink.dim)
-        case .failed(let message):
-          Text(message).foregroundStyle(Ink.bad)
-          Button("Try again") { strip.scan() }.frame(minHeight: 44)
-        default:
+        } else {
           if strips.isEmpty {
             HStack(spacing: 12) {
               ProgressView()
               Text("Looking for DayBetter strips…").foregroundStyle(Ink.dim)
+            }
+            if slowSearch {
+              VStack(alignment: .leading, spacing: 12) {
+                Text("Not showing up? Try these").font(.subheadline.weight(.semibold))
+                ForEach(Self.tips, id: \.self) { tip in
+                  Label(tip, systemImage: "checkmark.circle")
+                    .font(.footnote)
+                    .foregroundStyle(Ink.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+              }
+              .padding(16)
+              .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+              .transition(.opacity)
             }
           }
           ForEach(strips) { device in
@@ -1009,8 +1354,17 @@ private struct StripSetup: View {
       }
       .padding(24)
     }
-    .onAppear { if strip.state == .idle { strip.scan() } }
-    .onChange(of: strip.state) { _, new in if new == .connected { dismiss() } }
+    .onAppear {
+      if case .failed = strip.adding?.state { strip.cancelAdding() }
+      strip.scan()
+    }
+    .onDisappear { strip.stopScan() }
+    .task {
+      try? await Task.sleep(for: .seconds(8))
+      withAnimation(.easeOut(duration: 0.25)) { slowSearch = true }
+    }
+    // The picked strip connected and joined the list.
+    .onChange(of: strip.strips.count) { old, new in if new > old { dismiss() } }
   }
 }
 
@@ -1156,6 +1510,22 @@ private struct HubSetup: View {
         case .unavailable(let message):
           Text("Couldn't reach Hubspace: \(message)").foregroundStyle(Ink.bad)
           primary("Try again", disabled: false) { await hubspace.load() }
+        case .ready:
+          // Signed in; a bulb tile sent you here because Hubspace can't reach that bulb.
+          VStack(alignment: .leading, spacing: 12) {
+            Text("Get the bulb on Wi-Fi").font(.headline)
+            ForEach(Array(Self.wifiSteps.enumerated()), id: \.offset) { i, step in
+              HStack(alignment: .top, spacing: 12) {
+                Text("\(i + 1)").font(.subheadline.weight(.bold)).frame(width: 24, height: 24).background(Circle().fill(Ink.raised))
+                Text(step).font(.subheadline).foregroundStyle(Ink.dim).fixedSize(horizontal: false, vertical: true)
+              }
+            }
+          }
+          primary("Check again", disabled: false) {
+            hubspace.clearOffline()
+            await hubspace.refresh()
+            dismiss()
+          }
         default:
           if case .loginFailed(let message) = hubspace.state {
             Text(message).foregroundStyle(Ink.bad).font(.subheadline)
@@ -1173,8 +1543,18 @@ private struct HubSetup: View {
       }
       .padding(24)
     }
-    .onChange(of: hubspace.state) { _, new in if new == .ready { dismiss() } }
+    // Signing in finishes setup; the Wi-Fi help (opened while signed in) closes itself from "Check again".
+    .onChange(of: hubspace.state) { _, new in if new == .ready, hubspace.offline.isEmpty { dismiss() } }
   }
+
+  // docs/ARCHITECTURE.md, Hubspace bulbs: campus networks only admit registered devices, and the bulb needs 2.4 GHz.
+  private static let wifiSteps = [
+    "In the Hubspace app, open the bulb's settings and copy its Wi-Fi MAC address.",
+    "Register that address on your school's device network (at NC A&T: Aggie_Guest self-registration, signed in with AggiePride). Wait for \"Approved\".",
+    "Run Wi-Fi setup for the bulb in the Hubspace app and pick that network. It has to be 2.4 GHz.",
+    "No campus network? A spare phone's Personal Hotspot with Maximize Compatibility on works too.",
+    "Come back and tap Check again, or pull down on the home screen.",
+  ]
 
   private func field(_ label: String, @ViewBuilder _ input: () -> some View) -> some View {
     VStack(alignment: .leading, spacing: 8) {
@@ -1197,6 +1577,140 @@ private struct HubSetup: View {
     .buttonStyle(Press())
     .disabled(disabled)
     .opacity(disabled ? 0.4 : 1)
+  }
+}
+
+/// Walk in settings: light up when you get home (WalkIn.swift).
+private struct WalkInSheet: View {
+  var room: Room
+
+  var body: some View {
+    let walkIn = room.walkIn
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Walk in").font(.system(.title, design: .rounded, weight: .bold))
+          Text("Your room lights up when you get back. Your strips are the sensor: when you've been gone 10 minutes and your phone comes back into a strip's Bluetooth range, the lights come on. No GPS, no extra hardware.")
+            .foregroundStyle(Ink.dim)
+        }
+
+        Toggle(isOn: Binding(get: { walkIn.enabled }, set: { walkIn.enabled = $0 })) {
+          Text("Light up when I get home").font(.body.weight(.semibold))
+        }
+        .frame(minHeight: 44)
+
+        HStack {
+          Text("What comes on")
+          Spacer()
+          Picker("What comes on", selection: Binding(get: { walkIn.sceneID }, set: { walkIn.sceneID = $0 })) {
+            Text("Lights as they were").tag(String?.none)
+            ForEach(room.moods) { Text($0.id).tag(Optional($0.id)) }
+          }
+          .pickerStyle(.menu)
+        }
+        .frame(minHeight: 44)
+        .disabled(!walkIn.enabled)
+
+        VStack(alignment: .leading, spacing: 12) {
+          Text("Your spot").font(.headline)
+          Text(walkIn.spot == nil
+               ? "Not set: the lights come on as soon as a strip is back in range, which is about your hallway. Stand right outside your door and tap Set my spot to make them wait until you're there."
+               : "Set: on the way back, the lights wait until you're about as close as where you stood.")
+            .font(.subheadline)
+            .foregroundStyle(Ink.dim)
+            .fixedSize(horizontal: false, vertical: true)
+          HStack(spacing: 12) {
+            Button {
+              walkIn.setSpot()
+            } label: {
+              HStack(spacing: 8) {
+                if walkIn.measuring { ProgressView().tint(.black) }
+                Text(walkIn.measuring ? "Measuring…" : walkIn.spot == nil ? "Set my spot" : "Set it again")
+              }
+              .font(.body.weight(.semibold))
+              .frame(maxWidth: .infinity, minHeight: 52)
+              .foregroundStyle(.black)
+              .background(Capsule().fill(.white))
+            }
+            .buttonStyle(Press())
+            .disabled(walkIn.measuring)
+            if walkIn.spot != nil {
+              Button("Clear") { walkIn.clearSpot() }
+                .frame(minWidth: 64, minHeight: 52)
+            }
+          }
+          if let error = walkIn.spotError {
+            Text(error).font(.footnote).foregroundStyle(Ink.bad)
+          }
+        }
+        .disabled(!walkIn.enabled)
+        .opacity(walkIn.enabled ? 1 : 0.5)
+
+        if let last = walkIn.lastArrival {
+          Label("Last welcome home: \(last.formatted(date: .abbreviated, time: .shortened))", systemImage: "house")
+            .font(.footnote)
+            .foregroundStyle(Ink.dim)
+        }
+
+        Text("It follows your phone, so a roommate coming in won't trigger it. Keep Bluetooth on and leave Dorm Remote in the app switcher: swiping it away stops iOS from waking it until you open it again.")
+          .font(.footnote)
+          .foregroundStyle(Ink.dim)
+      }
+      .padding(24)
+    }
+    .sensoryFeedback(.success, trigger: walkIn.spot)
+  }
+}
+
+/// Recipes for the Shortcuts actions in Intents.swift. iOS runs automations even with the app closed, which is
+/// how schedules work here: an app can't keep its own timers running in the background.
+private struct AutomationsSheet: View {
+  @Environment(\.openURL) private var openURL
+
+  private static let recipes: [(icon: String, title: String, how: String)] = [
+    ("sunrise", "Wake up to light", "Automation → Alarm → Is Stopped → Run Immediately → Dorm Remote: Set scene → Sunrise."),
+    ("moon.zzz", "Fade out at bedtime", "Automation → Sleep (Focus) → Turns On → Run Immediately → Dorm Remote: Fade lights out."),
+    ("clock", "Lights on at a set time", "Automation → Time of Day → pick a time → Run Immediately → Dorm Remote: Set scene."),
+    ("button.horizontal.top.press", "Action Button", "Settings → Action Button → Shortcut → Dorm Remote: Toggle lights."),
+    ("switch.2", "Control Center", "Open Control Center → + → Add a Control → Shortcuts → Dorm Remote: Toggle lights."),
+    ("mic", "Siri", "Say \"Toggle Dorm Remote\", \"Goodnight Dorm Remote\", or \"Set Dorm Remote scene\"."),
+  ]
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Schedules & automations").font(.system(.title, design: .rounded, weight: .bold))
+          Text("Set these up once in the Shortcuts app. They run on their own, even when Dorm Remote is closed.")
+            .foregroundStyle(Ink.dim)
+        }
+        ForEach(Self.recipes, id: \.title) { r in
+          HStack(alignment: .top, spacing: 16) {
+            Image(systemName: r.icon)
+              .frame(width: 44, height: 44)
+              .background(Circle().fill(Ink.raised))
+            VStack(alignment: .leading, spacing: 4) {
+              Text(r.title).font(.body.weight(.semibold))
+              Text(r.how).font(.footnote).foregroundStyle(Ink.dim).fixedSize(horizontal: false, vertical: true)
+            }
+          }
+        }
+        Button {
+          if let url = URL(string: "shortcuts://") { openURL(url) }
+        } label: {
+          Text("Open Shortcuts")
+            .font(.body.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .foregroundStyle(.black)
+            .background(Capsule().fill(.white))
+        }
+        .buttonStyle(Press())
+        Text("Swiping Dorm Remote away in the app switcher stops iOS from reconnecting your lights in the background until you open it again.")
+          .font(.footnote)
+          .foregroundStyle(Ink.dim)
+      }
+      .padding(24)
+    }
   }
 }
 
@@ -1343,6 +1857,9 @@ private struct RoomMapSheet: View {
                   .fill(light.glow.color)
                   .frame(width: 34, height: 34)
                   .overlay(Circle().strokeBorder(Ink.text, style: StrokeStyle(lineWidth: 2, dash: placed == nil ? [4] : [])))
+                  // Same look, a 44 pt grab area.
+                  .padding(5)
+                  .contentShape(Circle())
                 Text(light.name).font(.caption2).lineLimit(1).fixedSize()
               }
               .position(x: (x + 1) / 2 * side, y: (y + 1) / 2 * side)
@@ -1350,6 +1867,7 @@ private struct RoomMapSheet: View {
                 room.setPlacement(light.id, x: g.location.x / side * 2 - 1, y: g.location.y / side * 2 - 1)
               })
               .accessibilityLabel(light.name)
+              .accessibilityHint("Drag to where it sits in your room")
             }
           }
           .frame(width: side, height: side)

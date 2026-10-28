@@ -80,7 +80,8 @@ final class BulbBank: NSObject {
 
   override init() {
     super.init()
-    central = CBCentralManager(delegate: self, queue: .main)
+    // Restore identifier: iOS keeps pending connects and relaunches the app for them (Apple TN3115).
+    central = CBCentralManager(delegate: self, queue: .main, options: [CBCentralManagerOptionRestoreIdentifierKey: "bulbs"])
   }
 
   func scan() {
@@ -148,7 +149,12 @@ final class BulbBank: NSObject {
   private func attach(_ p: CBPeripheral) {
     peripherals[p.identifier] = p
     p.delegate = self
-    central.connect(p)
+    // A link iOS kept while the app was away only needs its characteristic found again.
+    if p.state == .connected, let kind = bulbs.first(where: { $0.id == p.identifier })?.kind {
+      p.discoverServices([kind.service])
+    } else {
+      central.connect(p)
+    }
   }
 
   private func save() {
@@ -162,8 +168,20 @@ final class BulbBank: NSObject {
 }
 
 extension BulbBank: CBCentralManagerDelegate {
+  func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+    for p in dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? [] where bulbs.contains(where: { $0.id == p.identifier }) {
+      peripherals[p.identifier] = p
+      p.delegate = self
+    }
+  }
+
   func centralManagerDidUpdateState(_ central: CBCentralManager) {
-    guard central.state == .poweredOn else { return }
+    guard central.state == .poweredOn else {
+      // Bluetooth off drops every link without a disconnect callback.
+      connected = []
+      writers = [:]
+      return
+    }
     // A pending connect waits until the bulb is in range and powered, then completes on its own.
     for p in central.retrievePeripherals(withIdentifiers: bulbs.map(\.id)) { attach(p) }
   }

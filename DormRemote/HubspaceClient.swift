@@ -36,6 +36,8 @@ final class HubspaceClient: NSObject {
   var lights: [HubLight] = []
   /// Last failed command, shown under the lights. Commands failing never sign you out.
   var commandError: String?
+  /// Bulbs Hubspace couldn't reach on the last command (424: not on Wi-Fi). Cleared when one answers again.
+  private(set) var offline: Set<String> = []
   var log: [String] = []
 
   enum K {
@@ -333,8 +335,10 @@ final class HubspaceClient: NSObject {
       do {
         _ = try await api("PUT", K.dataHost + "/v1/accounts/\(accountID)/metadevices/\(light.id)/state", json: body)
         commandError = nil
+        offline.remove(light.id)
       } catch {
         commandError = "\(light.name): \(error.localizedDescription)"
+        if error is BulbOffline { offline.insert(light.id) }
       }
       // A newer command for this slot cancels this task; only the latest one clears the slot.
       guard !Task.isCancelled else { return }
@@ -361,7 +365,7 @@ final class HubspaceClient: NSObject {
     // A token can be rejected before its stated expiry; refresh once and retry.
     if status == 401, !retried { return try await api(method, url, json: json, retried: true, quiet: quiet) }
     // 424: Hubspace can't reach the bulb because it isn't on Wi-Fi.
-    if status == 424 { throw Failure("The bulb is offline. Finish its Wi-Fi setup in the Hubspace app.") }
+    if status == 424 { throw BulbOffline() }
     guard (200..<300).contains(status) else {
       // The error body says why (e.g. which field the hub join rejected).
       note("\(status) body: " + String(decoding: data.prefix(300), as: UTF8.self))
@@ -369,6 +373,9 @@ final class HubspaceClient: NSObject {
     }
     return data.isEmpty ? nil : try JSONSerialization.jsonObject(with: data)
   }
+
+  /// "Check again": treat every bulb as reachable until a command says otherwise.
+  func clearOffline() { offline = [] }
 
   private func note(_ line: String) {
     log.append("hubspace: " + line)
@@ -488,6 +495,11 @@ extension HubspaceClient: URLSessionTaskDelegate {
 struct Failure: LocalizedError {
   let errorDescription: String?
   init(_ message: String) { errorDescription = message }
+}
+
+/// Hubspace answered 424: it can't reach the bulb because the bulb isn't on Wi-Fi.
+struct BulbOffline: LocalizedError {
+  var errorDescription: String? { "The bulb isn't on Wi-Fi, so Hubspace can't reach it." }
 }
 
 extension Data {

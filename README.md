@@ -4,27 +4,31 @@ An iPhone app that controls the dorm lights from one screen. Same pipeline as Gl
 
 | Light | How the app reaches it | Status |
 |---|---|---|
-| Daybetter strip (SKU TCF0223124G-JA02) | Bluetooth LE, any QC controller revision, CCHIP unlock | Built |
-| EcoSmart bulb (Hubspace) | Afero cloud API, login as in [aioafero](https://github.com/Expl0dingBanana/aioafero) | Built |
-| Xtreme Lit astronaut | IR, through an ESP32 bridge | Needs the ESP32 |
+| Daybetter strips (SKU TCF0223124G-JA02), any number | Bluetooth LE, QC controller revisions, CCHIP unlock when needed | Built |
+| EcoSmart bulb (Hubspace) | Afero cloud API, login as in [aioafero](https://github.com/Expl0dingBanana/aioafero) | Built; the bulb must be on Wi-Fi |
+| Triones / ELK-BLEDOM bulbs | Bluetooth LE | Built |
+| Xtreme Lit astronaut and other IR devices | IR, through the ESP32 DormBridge | Needs the board |
+
+Design notes and sources: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Hubspace
 
-Login is Keycloak with PKCE at `accounts.hubspaceconnect.com` (realm `thd`, client `hubspace_android`). The `id_token` is the bearer. Lights are read from `semantics2.afero.net/v1/accounts/{account}/metadevices` and changed with a PUT to `…/metadevices/{id}/state`. The refresh token is kept in the Keychain.
+Login is Keycloak with PKCE at `accounts.hubspaceconnect.com` (realm `thd`, client `hubspace_android`). The `id_token` is the bearer. Lights are read from `semantics2.afero.net/v1/accounts/{account}/metadevices` and changed with a PUT to `…/metadevices/{id}/state`. The refresh token is kept in the Keychain. A `424` reply means the bulb isn't on Wi-Fi; its tile says so and opens the fix.
 
 ## Daybetter protocol
 
-`A0 <cmd> <payloadLen+3> <payload…> <CRC-16/MODBUS, low byte first>`. Full reference: [DoudGeorges/daybetter-leds PROTOCOL.md](https://github.com/DoudGeorges/daybetter-leds).
-
-Controller revisions use different GATT IDs: service `E0xx` with write `A0xx` and notify `F0xx`, or `FF10`/`FF12`/`FF11`. Newer firmware ignores commands until the CCHIP unlock: send `CCHIP` (cmd `00`), XOR the two reply bytes at index 8 and 9 with 36 and 76, and send `CCHIP` plus those bytes (cmd `01`). The app waits 1.5 s for the challenge and skips the unlock if none comes. Color starts as 3-byte RGB and switches to RGBW if the strip rejects it.
+`A0 <cmd> <payloadLen+3> <payload…> <CRC-16/MODBUS, low byte first>`, as in [grimsteel/daybetter-led-strip](https://github.com/grimsteel/daybetter-led-strip) (written for the P031). Reference for other revisions: [DoudGeorges/daybetter-leds PROTOCOL.md](https://github.com/DoudGeorges/daybetter-leds).
 
 | Command | cmd | Payload |
 |---|---|---|
+| Status | `10` | `00` |
 | Power | `11` | `01` on, `00` off |
+| Effect | `12` | effect id |
 | Brightness | `13` | 1 to 100 |
-| Color | `15` | `RR GG BB` |
+| Color | `15` | `RR GG BB`, gamma and channel corrected |
+| Effect speed | `16` | 1 to 100 |
 
-Commands come from [homebridge-daybetter](https://github.com/shindekokoro/homebridge-daybetter). Its last two bytes were unexplained; they match CRC-16/MODBUS on every captured frame, so any color works.
+On connect the app asks for status. A strip that answers is ready. A silent one gets the CCHIP unlock: send `CCHIP` (cmd `00`), XOR the reply bytes at index 8 and 9 with 36 and 76, send `CCHIP` plus those bytes (cmd `01`). The app remembers each strip's service and whether it needed the unlock, so reconnects are quicker. "Magic Light" segment controllers use another command set and are named, not driven.
 
 ## Install
 
@@ -34,4 +38,8 @@ Commands come from [homebridge-daybetter](https://github.com/shindekokoro/homebr
 
 ## Use
 
-Fully close the DayBetter app first. The strip accepts one Bluetooth connection at a time. Open Dorm Remote, tap your strip in the list, and it reconnects automatically next time. If it can't find service `E026`, tap **Log** and share it.
+- Fully close the DayBetter app first. A strip accepts one Bluetooth connection at a time.
+- **Add → DayBetter LED strip** for each strip. Strips you've added stay connected and reconnect by themselves.
+- Pull down on the home screen to reconnect anything that dropped.
+- **⋯ → Schedules & automations** has Shortcuts recipes: wake-up light, bedtime fade, Action Button, Control Center, Siri.
+- If a strip won't connect, **⋯ → Show log** and share it.
