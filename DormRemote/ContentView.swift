@@ -3,8 +3,8 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-// Design, "night room": a near-black canvas, cards with a hairline edge, and the lights' own colors as the
-// accent. Lit tiles carry a tint of their color, and the background glows with whatever is on.
+// Design, "night room": a near-black canvas, gray cards with a hairline edge, and white for anything you press.
+// The lights are the only color: their dots, sliders and a soft glow behind every tab.
 // Layout follows the Hubspace light screen (mode circles, brightness bar, presets, wheel)
 // with DayBetter's patterns and music on top.
 private enum Ink {
@@ -17,8 +17,63 @@ private enum Ink {
   /// Secondary text: 7.3:1 on cards, 6.4:1 on raised fills (WCAG AA needs 4.5).
   static let dim = Color(hex: 0xA1A1AA)
   static let bad = Color(hex: 0xFF6B5E)
-  /// The app icon's strip, warm to cool. Only for the wordmark.
-  static let brand = [Color(hex: 0xFF7A30), Color(hex: 0xFF2D78), Color(hex: 0xC56BFF), Color(hex: 0x6E9BFF), Color(hex: 0x00D9FF)]
+}
+
+/// One set of timings for the whole app, so every screen moves the same way.
+private enum Motion {
+  /// Taps and selections: quick, settles without bounce.
+  static let tap = Animation.spring(response: 0.3, dampingFraction: 0.86)
+  /// Something showing, hiding or changing state.
+  static let state = Animation.easeOut(duration: 0.22)
+  /// Effect frames arrive ten times a second; a short blend keeps them smooth without lagging the light.
+  static let frame = Animation.linear(duration: 0.12)
+  /// The room's glow: the mood, not a control, so it drifts.
+  static let mood = Animation.easeInOut(duration: 0.6)
+}
+
+/// The room's light behind every tab: the average of what's on, washed faintly from the top. Shared, so switching
+/// tabs keeps the same room around you.
+private struct RoomGlow: View {
+  var room: Room
+
+  var body: some View {
+    ZStack {
+      Ink.bg
+      if let ambient = room.ambient {
+        RadialGradient(colors: [ambient.opacity(0.22), ambient.opacity(0.05), .clear], center: .top, startRadius: 0, endRadius: 560)
+      }
+    }
+    .ignoresSafeArea()
+    .animation(Motion.mood, value: room.ambient)
+  }
+}
+
+/// The top of each tab: a small label over a big title, the same on Room, Map and Automations.
+private struct PageTitle: View {
+  let eyebrow: String
+  let title: String
+  init(_ eyebrow: String, _ title: String) { self.eyebrow = eyebrow; self.title = title }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(eyebrow.uppercased()).font(.caption2.weight(.heavy)).tracking(2.5).foregroundStyle(Ink.dim)
+      Text(title)
+        .font(.system(.largeTitle, design: .rounded, weight: .bold))
+        .contentTransition(.opacity)
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+    }
+  }
+}
+
+extension View {
+  /// Every sheet looks the same: dark card, rounded, with a grabber.
+  fileprivate func panel() -> some View {
+    presentationDragIndicator(.visible)
+      .presentationBackground(Ink.card)
+      .presentationCornerRadius(32)
+      .preferredColorScheme(.dark)
+  }
 }
 
 /// A card: the base surface for rows and panels. `tint` washes it with a light's color while it's on.
@@ -30,9 +85,7 @@ private struct Card: ViewModifier {
     let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
     content.background(
       shape.fill(Ink.card)
-        // 12 %: secondary text stays above 5:1 even on a tile lit pure white.
-        .overlay(shape.fill(LinearGradient(colors: [(tint ?? .clear).opacity(0.12), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)))
-        .overlay(shape.strokeBorder(tint.map { $0.opacity(0.22) } ?? Ink.line, lineWidth: 1))
+        .overlay(shape.strokeBorder(tint.map { $0.opacity(0.28) } ?? Ink.line, lineWidth: 1))
     )
   }
 }
@@ -103,6 +156,8 @@ struct ContentView: View {
         .tabItem { Label("Automations", systemImage: "clock.arrow.2.circlepath") }
     }
     .tint(Ink.text)
+    .toolbarBackground(Ink.bg.opacity(0.7), for: .tabBar)
+    .preferredColorScheme(.dark)
   }
 
   private var roomTab: some View {
@@ -128,7 +183,7 @@ struct ContentView: View {
           VStack(spacing: 16) {
             Image(systemName: "light.strip.2")
               .font(.system(size: 28, weight: .medium))
-              .foregroundStyle(LinearGradient(colors: Ink.brand, startPoint: .leading, endPoint: .trailing))
+              .foregroundStyle(Ink.dim)
             VStack(spacing: 4) {
               Text("Nothing in \(room.currentRoom) yet").font(.headline)
               Text("Add a light, or move one here from its settings.")
@@ -161,7 +216,7 @@ struct ContentView: View {
       .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
     }
     .listStyle(.plain)
-    .animation(.easeOut(duration: 0.25), value: room.effect)
+    .animation(Motion.state, value: room.effect)
     // Pull down to reconnect anything that dropped and re-read the bulbs.
     .refreshable { await room.reconnect() }
     .onChange(of: scenePhase, initial: true) { _, phase in
@@ -169,7 +224,7 @@ struct ContentView: View {
     }
     .scrollContentBackground(.hidden)
     .scrollIndicators(.hidden)
-    .background(glow)
+    .background(RoomGlow(room: room))
     .foregroundStyle(Ink.text)
     .tint(Ink.text)
     .sheet(item: $sheet) { sheet in
@@ -196,10 +251,7 @@ struct ContentView: View {
         case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
         }
       }
-      .presentationDragIndicator(.visible)
-      .presentationBackground(Ink.card)
-      .presentationCornerRadius(32)
-      .preferredColorScheme(.dark)
+      .panel()
     }
     .confirmationDialog("Remove \(removing?.name ?? "this device")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
       Button("Remove", role: .destructive) {
@@ -238,7 +290,7 @@ struct ContentView: View {
         ForEach(room.rooms, id: \.self) { name in
           let selected = room.currentRoom == name
           Button {
-            withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.3, dampingFraction: 0.85)) { room.selectedRoom = name }
+            withAnimation(reduceMotion ? Motion.state : Motion.tap) { room.selectedRoom = name }
           } label: {
             Text(name)
               .font(.subheadline.weight(.semibold))
@@ -282,31 +334,10 @@ struct ContentView: View {
     .sensoryFeedback(.selection, trigger: room.currentRoom)
   }
 
-  /// The room's light spills onto the screen: a wide glow from the top, and a fainter pool at the bottom.
-  private var glow: some View {
-    ZStack {
-      Ink.bg
-      if let ambient = room.ambient {
-        RadialGradient(colors: [ambient.opacity(0.42), ambient.opacity(0.08), .clear], center: .top, startRadius: 0, endRadius: 520)
-        RadialGradient(colors: [ambient.opacity(0.12), .clear], center: .bottom, startRadius: 0, endRadius: 420)
-      }
-    }
-    .ignoresSafeArea()
-    // A color change in the room is worth a slow, soft crossfade; it's the mood, not a control.
-    .animation(.easeInOut(duration: 0.6), value: room.ambient)
-  }
-
   private var header: some View {
     HStack(alignment: .center, spacing: 8) {
       VStack(alignment: .leading, spacing: 4) {
-        Text("DORM REMOTE")
-          .font(.caption2.weight(.heavy))
-          .tracking(2.5)
-          .foregroundStyle(LinearGradient(colors: Ink.brand, startPoint: .leading, endPoint: .trailing))
-          .accessibilityHidden(true)
-        Text(room.currentRoom)
-          .font(.system(.largeTitle, design: .rounded, weight: .bold))
-          .contentTransition(.opacity)
+        PageTitle("Dorm Remote", room.currentRoom)
         Text(summary)
           .font(.subheadline)
           .foregroundStyle(Ink.dim)
@@ -337,7 +368,7 @@ struct ContentView: View {
       .buttonStyle(Press())
       .disabled(room.roomReady.filter { $0.kind != .remote }.isEmpty)
       .accessibilityLabel("Room controls")
-      PowerButton(on: room.anyOn, tint: room.ambient ?? .white) {
+      PowerButton(on: room.anyOn) {
         room.setPower(Room.all, !room.anyOn)
       }
       .disabled(room.roomReady.isEmpty)
@@ -359,13 +390,12 @@ struct ContentView: View {
                 .frame(width: 28, height: 28)
                 .overlay(Circle().strokeBorder(Ink.card, lineWidth: 2))
                 .offset(x: CGFloat(i) * 14)
-                .animation(.linear(duration: 0.12), value: room.shown(light))
+                .animation(Motion.frame, value: room.shown(light))
             }
           }
           .frame(width: 28 + CGFloat(max(0, min(4, lights.count) - 1)) * 14, height: 28, alignment: .leading)
-          .shadow(color: (lights.first.map { room.shown($0).color } ?? .white).opacity(0.6), radius: 10)
           VStack(alignment: .leading, spacing: 2) {
-            Text("NOW PLAYING").font(.caption2.weight(.heavy)).tracking(1.5).foregroundStyle(Ink.dim)
+            Text("NOW PLAYING").font(.caption2.weight(.heavy)).tracking(2).foregroundStyle(Ink.dim)
             Text(effect.name).font(.body.weight(.semibold)).lineLimit(1)
           }
           Spacer()
@@ -399,7 +429,7 @@ struct ContentView: View {
           Capsule()
             .fill(Ink.raised)
             .overlay(alignment: .leading) {
-              GeometryReader { geo in Capsule().fill(.white).frame(width: geo.size.width * room.level) }
+              GeometryReader { geo in Capsule().fill(Ink.text).frame(width: geo.size.width * room.level) }
             }
             .frame(height: 6)
             .animation(.linear(duration: 0.05), value: room.level)
@@ -407,7 +437,7 @@ struct ContentView: View {
       }
       .padding(16)
       .card(tint: lights.first.map { room.shown($0).color })
-      .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+      .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
       .accessibilityElement(children: .contain)
     }
   }
@@ -445,7 +475,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
           ForEach(groups, id: \.self) { g in
             Button {
-              withAnimation(.easeOut(duration: 0.2)) { sceneGroup = g }
+              withAnimation(Motion.state) { sceneGroup = g }
             } label: {
               Text(g)
                 .font(.footnote.weight(.semibold))
@@ -513,11 +543,10 @@ struct ContentView: View {
           .frame(width: 60, height: 60)
           .padding(4)
           .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
-          .shadow(color: room.mood == mood.id ? mood.swatch[0].opacity(0.55) : .clear, radius: 12)
-          .animation(.easeOut(duration: 0.2), value: room.mood)
+          .animation(Motion.tap, value: room.mood)
           .overlay(alignment: .topTrailing) {
             if room.favorites.contains(mood.id) {
-              Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.yellow)
+              Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(Ink.text)
                 .padding(4).background(Circle().fill(Ink.bg))
             }
           }
@@ -628,7 +657,6 @@ private struct SectionTitle: View {
 
 private struct PowerButton: View {
   let on: Bool
-  let tint: Color
   let action: () -> Void
 
   var body: some View {
@@ -637,8 +665,8 @@ private struct PowerButton: View {
         .font(.system(size: 20, weight: .semibold))
         .frame(width: 52, height: 52)
         .foregroundStyle(on ? .black : Ink.text)
-        .background(Circle().fill(on ? tint : Ink.raised))
-        .shadow(color: on ? tint.opacity(0.6) : .clear, radius: 16)
+        .background(Circle().fill(on ? Ink.text : Ink.raised))
+        .animation(Motion.state, value: on)
     }
     .buttonStyle(Press())
     .sensoryFeedback(.impact(weight: .medium), trigger: on)
@@ -661,10 +689,9 @@ private struct Orb: View {
       .frame(width: size, height: size)
       .foregroundStyle(lit ? .black.opacity(0.75) : Ink.dim)
       .background(Circle().fill(lit ? glow : Ink.raised))
-      .shadow(color: lit ? glow.opacity(0.8) : .clear, radius: 14)
-      .animation(.easeOut(duration: 0.2), value: lit)
-      // Effect frames come ten times a second; a short blend keeps them smooth without lagging behind the light.
-      .animation(.linear(duration: 0.12), value: color)
+      .shadow(color: lit ? glow.opacity(0.45) : .clear, radius: 12)
+      .animation(Motion.state, value: lit)
+      .animation(Motion.frame, value: color)
   }
 
   private var icon: String {
@@ -728,7 +755,7 @@ private struct LightRow: View {
     .contentShape(RoundedRectangle(cornerRadius: 24))
     .onTapGesture(perform: open)
     .sensoryFeedback(.impact(weight: .light), trigger: item.on)
-    .animation(.easeOut(duration: 0.2), value: item.on)
+    .animation(Motion.state, value: item.on)
     .accessibilityElement(children: .contain)
     .accessibilityAction(named: "Open \(item.name)", open)
   }
@@ -924,9 +951,7 @@ private struct LightSheet: View {
       }
       .sheet(isPresented: $matching) {
         MatchSheet(room: room)
-          .presentationDragIndicator(.visible)
-          .presentationBackground(Ink.card)
-          .preferredColorScheme(.dark)
+          .panel()
       }
       .alert("Rename", isPresented: $renaming) {
         TextField("Name", text: $newName)
@@ -958,7 +983,7 @@ private struct LightSheet: View {
         .accessibilityAddTraits(mode == m ? .isSelected : [])
       }
     }
-    .animation(.easeOut(duration: 0.15), value: mode)
+    .animation(Motion.state, value: mode)
     .sensoryFeedback(.selection, trigger: mode)
   }
 
@@ -971,8 +996,8 @@ private struct LightSheet: View {
       Circle().fill(AngularGradient(colors: (0...12).map { RGB.hue(Double($0) / 12).color }, center: .center))
     case .effects:
       Circle()
-        .fill(LinearGradient(colors: [Color(hex: 0xFFD54A), Color(hex: 0xFF9F1C)], startPoint: .top, endPoint: .bottom))
-        .overlay(Image(systemName: "play.fill").font(.title2).foregroundStyle(.white))
+        .fill(Ink.raised)
+        .overlay(Image(systemName: "play.fill").font(.title2).foregroundStyle(Ink.text))
     }
   }
 
@@ -1112,7 +1137,7 @@ private struct LightSheet: View {
         Capsule()
           .fill(Ink.raised)
           .overlay(alignment: .leading) {
-            GeometryReader { geo in Capsule().fill(.white).frame(width: geo.size.width * room.level) }
+            GeometryReader { geo in Capsule().fill(Ink.text).frame(width: geo.size.width * room.level) }
           }
           .frame(height: 6)
           .animation(.linear(duration: 0.05), value: room.level)
@@ -1170,10 +1195,9 @@ private struct LightSheet: View {
       .padding(.horizontal, 14)
       .frame(maxWidth: .infinity, minHeight: 56)
       // The running effect lights up in its own colors.
-      .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(active ? colors[0].opacity(0.18) : Ink.raised))
-      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(active ? colors[0].opacity(0.9) : Ink.line, lineWidth: active ? 1.5 : 1))
-      .shadow(color: active ? colors[0].opacity(0.35) : .clear, radius: 10)
-      .animation(.easeOut(duration: 0.2), value: active)
+      .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised))
+      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(active ? Ink.text : Ink.line, lineWidth: active ? 1.5 : 1))
+      .animation(Motion.state, value: active)
     }
     .buttonStyle(Press())
     .sensoryFeedback(.selection, trigger: active)
@@ -1454,7 +1478,7 @@ private struct StripSetup: View {
     .onDisappear { strip.stopScan() }
     .task {
       try? await Task.sleep(for: .seconds(8))
-      withAnimation(.easeOut(duration: 0.25)) { slowSearch = true }
+      withAnimation(Motion.state) { slowSearch = true }
     }
     // The picked strip connected and joined the list.
     .onChange(of: strip.strips.count) { old, new in if new > old { dismiss() } }
@@ -1665,7 +1689,7 @@ private struct HubSetup: View {
         .font(.body.weight(.semibold))
         .frame(maxWidth: .infinity, minHeight: 52)
         .foregroundStyle(.black)
-        .background(Capsule().fill(.white))
+        .background(Capsule().fill(Ink.text))
     }
     .buttonStyle(Press())
     .disabled(disabled)
@@ -1779,7 +1803,7 @@ private struct WalkInSection: View {
           .font(.body.weight(.semibold))
           .frame(maxWidth: .infinity, minHeight: 52)
           .foregroundStyle(.black)
-          .background(Capsule().fill(.white))
+          .background(Capsule().fill(Ink.text))
         }
         .buttonStyle(Press())
         .disabled(walkIn.measuring)
@@ -1877,7 +1901,7 @@ private struct ScheduleSection: View {
             .font(.body.weight(.semibold))
             .frame(maxWidth: .infinity, minHeight: 52)
             .foregroundStyle(.black)
-            .background(Capsule().fill(.white))
+            .background(Capsule().fill(Ink.text))
         }
         .buttonStyle(Press())
         Text("Swiping Dorm Remote away in the app switcher stops iOS from reconnecting your lights in the background until you open it again.")
@@ -1894,10 +1918,7 @@ private struct AutomationsTab: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 32) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("AUTOMATIONS").font(.caption2.weight(.heavy)).tracking(2.5).foregroundStyle(Ink.dim)
-          Text("On their own").font(.system(.largeTitle, design: .rounded, weight: .bold))
-        }
+        PageTitle("Automations", "On their own")
         WalkInSection(room: room)
         Rectangle().fill(Ink.line).frame(height: 1)
         ScheduleSection()
@@ -1906,7 +1927,8 @@ private struct AutomationsTab: View {
       .padding(.vertical, 16)
     }
     .scrollIndicators(.hidden)
-    .background(Ink.bg.ignoresSafeArea())
+    .background(RoomGlow(room: room))
+    .foregroundStyle(Ink.text)
   }
 }
 
@@ -2005,9 +2027,9 @@ private struct ScanSheet: View {
             Circle().strokeBorder(.white.opacity(0.5), lineWidth: 2)
             Circle()
               .trim(from: 0, to: scanner.lock)
-              .stroke(Color(hex: 0x34C759), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+              .stroke(Ink.text, style: StrokeStyle(lineWidth: 5, lineCap: .round))
               .rotationEffect(.degrees(-90))
-              .animation(.easeOut(duration: 0.15), value: scanner.lock)
+              .animation(Motion.state, value: scanner.lock)
           }
           .frame(width: d, height: d)
           .position(x: geo.size.width / 2, y: geo.size.height / 2)
@@ -2125,7 +2147,7 @@ private struct ScanSheet: View {
         .font(.body.weight(.semibold))
         .frame(maxWidth: .infinity, minHeight: 52)
         .foregroundStyle(.black)
-        .background(Capsule().fill(.white))
+        .background(Capsule().fill(Ink.text))
     }
     .buttonStyle(Press())
   }
@@ -2183,23 +2205,15 @@ private struct MapScreen: View {
       .padding(.vertical, 16)
     }
     .scrollIndicators(.hidden)
-    .background(Ink.bg.ignoresSafeArea())
-    .sheet(isPresented: $scanning) {
-      ScanSheet(room: room)
-        .presentationDragIndicator(.visible)
-        .presentationBackground(Ink.card)
-        .presentationCornerRadius(32)
-        .preferredColorScheme(.dark)
-    }
+    .background(RoomGlow(room: room))
+    .foregroundStyle(Ink.text)
+    .sheet(isPresented: $scanning) { ScanSheet(room: room).panel() }
   }
 
   private var header: some View {
     VStack(alignment: .leading, spacing: 16) {
       HStack(alignment: .bottom) {
-        VStack(alignment: .leading, spacing: 4) {
-          Text("MAP").font(.caption2.weight(.heavy)).tracking(2.5).foregroundStyle(Ink.dim)
-          Text(room.currentRoom).font(.system(.largeTitle, design: .rounded, weight: .bold))
-        }
+        PageTitle("Map", room.currentRoom)
         Spacer()
         if room.rooms.count > 1 {
           Menu {
@@ -2223,7 +2237,7 @@ private struct MapScreen: View {
           .font(.body.weight(.semibold))
           .frame(maxWidth: .infinity, minHeight: 52)
           .foregroundStyle(.black)
-          .background(Capsule().fill(.white))
+          .background(Capsule().fill(Ink.text))
       }
       .buttonStyle(Press())
       .disabled(room.scanTargets().isEmpty)
@@ -2346,11 +2360,11 @@ private struct MapScreen: View {
         Circle()
           .fill(lit ? c : Ink.raised)
           .frame(width: 34, height: 34)
-          .shadow(color: lit ? c.opacity(0.8) : .clear, radius: 12)
+          .shadow(color: lit ? c.opacity(0.45) : .clear, radius: 12)
           .overlay(Image(systemName: light.kind == .strip ? "light.strip.2" : "lightbulb.fill")
             .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(lit ? .black.opacity(0.7) : Ink.dim))
-          .animation(.linear(duration: 0.12), value: room.shown(light))
+          .animation(Motion.frame, value: room.shown(light))
       }
       Text(light.name).font(.caption2.weight(.medium)).lineLimit(1).fixedSize()
       if !found {
@@ -2398,7 +2412,7 @@ private struct MapScreen: View {
         HStack(spacing: 8) {
           ForEach(Room.SweepStyle.allCases, id: \.self) { style in
             let on = room.sweepStyle == style
-            Button { room.sweepStyle = style } label: {
+            Button { withAnimation(Motion.tap) { room.sweepStyle = style } } label: {
               Text(style.rawValue)
                 .font(.footnote.weight(.semibold))
                 .padding(.horizontal, 14)
@@ -2517,12 +2531,12 @@ private struct RemoteSheet: View {
             if learnMode || !ready { bridge.learn(button, device: device.id) } else { bridge.press(button, device: device.id) }
           } label: {
             VStack(spacing: 8) {
-              Image(systemName: button.icon).font(.title3)
+              Image(systemName: button.icon).font(.title3).foregroundStyle(button.id == "power" ? Ink.bad : Ink.text)
               Text(button.name).font(.caption.weight(.medium)).lineLimit(1)
             }
             .frame(maxWidth: .infinity, minHeight: 72)
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
-              .fill(button.id == "power" ? Color(hex: 0xFF453A).opacity(0.25) : Ink.raised))
+              .fill(Ink.raised))
             .opacity(ready || learnMode ? 1 : 0.45)
             .overlay(alignment: .topTrailing) {
               if bridge.isLearned(button, device: device.id) {
@@ -2603,7 +2617,7 @@ private struct AddRemoteSheet: View {
             .font(.body.weight(.semibold))
             .frame(maxWidth: .infinity, minHeight: 52)
             .foregroundStyle(.black)
-            .background(Capsule().fill(.white))
+            .background(Capsule().fill(Ink.text))
         }
         .buttonStyle(Press())
       }
