@@ -244,6 +244,15 @@ struct ContentView: View {
           .foregroundStyle(Ink.dim)
       }
       .accessibilityLabel("More")
+      Button { sheet = .light(Room.all) } label: {
+        Image(systemName: "slider.horizontal.3")
+          .font(.system(size: 17, weight: .semibold))
+          .frame(width: 44, height: 44)
+          .background(Circle().fill(Ink.raised))
+      }
+      .buttonStyle(Press())
+      .disabled(room.roomReady.filter { $0.kind != .remote }.isEmpty)
+      .accessibilityLabel("Room controls")
       PowerButton(on: room.anyOn, tint: room.ambient ?? .white) {
         room.setPower(Room.all, !room.anyOn)
       }
@@ -642,6 +651,15 @@ private struct LightSheet: View {
   @State private var newName = ""
   @Environment(\.dismiss) private var dismiss
 
+  /// Room controls: the same sheet, acting on every light in the room.
+  private var isRoom: Bool { id == Room.all }
+
+  /// For the room, Effects means strip effects, so it shows only when the room has a strip.
+  private func modeAvailable(_ m: Mode, _ item: LightItem) -> Bool {
+    guard isRoom else { return item.caps.contains(m.capability) }
+    return m != .effects || room.roomReady.contains { $0.kind == .strip }
+  }
+
   // Fully saturated, one hue step apart, so each reads as its own color on an LED instead of drifting to white.
   private static let swatches: [RGB] = [
     RGB(r: 255, g: 0, b: 0), RGB(r: 255, g: 90, b: 0), RGB(r: 255, g: 160, b: 0), RGB(r: 255, g: 230, b: 0),
@@ -652,12 +670,12 @@ private struct LightSheet: View {
   private static let temperatures = [2200, 2700, 4000, 5000, 6500]
 
   var body: some View {
-    if let item = room.item(id) {
+    if let item = isRoom ? room.look(id) : room.item(id) {
       ScrollView {
         VStack(alignment: .leading, spacing: 28) {
           HStack(spacing: 16) {
             Orb(item: item, size: 44)
-            Text(item.name)
+            Text(isRoom ? room.currentRoom : item.name)
               .font(.system(.title, design: .rounded, weight: .bold))
               .lineLimit(1)
             Spacer()
@@ -684,16 +702,20 @@ private struct LightSheet: View {
           case .white: whiteControls(item)
           case .color: colorControls(item)
           case .effects:
-            if item.kind == .strip { stripEffects } else { bulbEffects(item) }
+            if isRoom || item.kind == .strip { stripEffects } else { bulbEffects(item) }
           }
 
-          if item.kind == .bulb {
+          if !isRoom, item.kind == .bulb {
             Text("The bulb takes commands through Hubspace's cloud, so it has to be on Wi-Fi. Changes can take a second.")
               .font(.footnote)
               .foregroundStyle(Ink.dim)
           }
 
-          footer(item)
+          if isRoom {
+            Text("Changes here go to every light in \(room.currentRoom).").font(.footnote).foregroundStyle(Ink.dim)
+          } else {
+            footer(item)
+          }
         }
         .padding(24)
         .padding(.top, 8)
@@ -721,7 +743,7 @@ private struct LightSheet: View {
 
   private func modePicker(_ item: LightItem) -> some View {
     return HStack(spacing: 0) {
-      ForEach(Mode.allCases.filter { item.caps.contains($0.capability) }, id: \.self) { m in
+      ForEach(Mode.allCases.filter { modeAvailable($0, item) }, id: \.self) { m in
         Button { mode = m } label: {
           VStack(spacing: 8) {
             modeCircle(m)

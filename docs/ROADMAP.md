@@ -41,4 +41,16 @@ Hue Lights (apps.apple.com/us/app/hue-lights/id762009425); Philips Hue app updat
 6. **Reduce flashing**: hides blink, flash and strobe effects and softens music mode.
 7. **Room controls**: one sheet for color, white, brightness and effects on the whole room.
 8. **Setup troubleshooting**: tips appear when no strip shows up after a few seconds.
-9. **Redesign**: same screens and features, better look and feel (type, depth, motion, haptics).
+9. **Walk in**: lights come on when you get back to your room, using the strips' Bluetooth as the sensor.
+   - Why not GPS: iOS geofences are only good to about 200 m, report a crossing only after you've moved past the
+     boundary and stayed 20 s, and lose accuracy indoors (Apple, Region Monitoring guide; Capawesome geofencing notes).
+     A "spot right outside my door" is finer than that.
+   - How: the app already holds a pending connect to each strip, and iOS wakes it when a strip comes back in range
+     (Apple, Core Bluetooth background processing; TN3115). Away for 10+ minutes, then a strip reconnects: lights on.
+   - "Set my spot": stand outside your door and the app records the strip's signal strength there; on the way back it
+     waits for at least that signal. Reading signal strength in the background isn't documented, so if iOS doesn't
+     allow it, the lights come on at reconnect.
+   - Walk out (optional): every strip gone for 5 minutes turns the room off.
+   - Limits: a force-quit app isn't woken; it follows your phone, not a roommate's. Coarse GPS fallback with no code:
+     Shortcuts → Arrive → Dorm Remote: Turn lights on (runs without asking since iOS 17).
+10. **Redesign**: same screens and features, better look and feel (type, depth, motion, haptics).
