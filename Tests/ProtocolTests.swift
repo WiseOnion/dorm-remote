@@ -42,9 +42,42 @@ final class DaybetterTests: XCTestCase {
     XCTAssertNil(StripStatus([0xA1, 0x13, 0x04, 0x01, 0x11, 0x1D]))
   }
 
+  // DoudGeorges PROTOCOL.md: request A0 00 08 "CCHIP" AC CA; answer "CCHIP" c1^36 c2^76; verdict byte 8, 0 = unlocked.
+  func testUnlock() throws {
+    XCTAssertEqual(hex(Daybetter.frame(Daybetter.challenge, Daybetter.cchip)), "A0 00 08 43 43 48 49 50 AC CA")
+    let challenge: [UInt8] = [0xA1, 0x00, 0x0A] + Daybetter.cchip + [0x10, 0x20, 0x00, 0x00]
+    let answer = try XCTUnwrap(Daybetter.unlockAnswer(to: challenge))
+    let body = Array(answer.prefix(10))
+    XCTAssertEqual(body, [0xA0, 0x01, 0x0A] + Daybetter.cchip + [0x10 ^ 36, 0x20 ^ 76])
+    let crc = Daybetter.crc16modbus(body)
+    XCTAssertEqual(Array(answer.suffix(2)), [UInt8(crc & 0xFF), UInt8(crc >> 8)])
+    // A status reply isn't a challenge.
+    XCTAssertNil(Daybetter.unlockAnswer(to: [0xA1, 0x10, 0x11, 0x01, 0x01, 0x00, 0x64, 0, 0, 0]))
+    XCTAssertEqual(Daybetter.unlockResult([0xA1, 0x01, 0x09] + Daybetter.cchip + [0x00]), true)
+    XCTAssertEqual(Daybetter.unlockResult([0xA1, 0x01, 0x09] + Daybetter.cchip + [0x01]), false)
+    XCTAssertNil(Daybetter.unlockResult([0xA1, 0x15, 0x04, 0x01, 0xF1, 0x1C]))
+  }
+
+  func testSpeedFrame() {
+    XCTAssertEqual(Array(Daybetter.frame(Daybetter.speed, [50]).prefix(4)), [0xA0, 0x16, 0x04, 50])
+  }
+
+  func testControllerFamilies() {
+    XCTAssertFalse(Daybetter.isSegmentController(CBUUID(string: "E031")))
+    XCTAssertFalse(Daybetter.isSegmentController(CBUUID(string: "FF10")))
+    XCTAssertTrue(Daybetter.isSegmentController(CBUUID(string: "E010")))
+    XCTAssertTrue(Daybetter.isSegmentController(CBUUID(string: "AE30")))
+    XCTAssertTrue(Daybetter.advertisesStrip([CBUUID(string: "C031")]))
+    XCTAssertTrue(Daybetter.advertisesStrip([CBUUID(string: "180A"), CBUUID(string: "AF30")]))
+    XCTAssertFalse(Daybetter.advertisesStrip([CBUUID(string: "180A")]))
+    XCTAssertFalse(Daybetter.advertisesStrip([]))
+  }
+
   func testStripNames() {
     XCTAssertTrue(Daybetter.looksLikeStrip("P031_3712"))
     XCTAssertTrue(Daybetter.looksLikeStrip("Smart Light"))
+    XCTAssertTrue(Daybetter.looksLikeStrip("WI-FI LIGHT"))
+    XCTAssertTrue(Daybetter.looksLikeStrip("BLE BULB"))
     XCTAssertFalse(Daybetter.looksLikeStrip("Echo Dot-107"))
     XCTAssertFalse(Daybetter.looksLikeStrip("PX31_1"))
   }

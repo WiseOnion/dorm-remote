@@ -23,14 +23,22 @@ iPhone (Dorm Remote) ──┤                                             │
 
 ## Why each choice
 
-### DayBetter strip: direct BLE (done)
-- Protocol is public: frame `A0 cmd len payload CRC16/MODBUS`, CCHIP unlock (XOR 36/76), service `E031` → write `A031`, notify `F031`.
-  Sources: DoudGeorges/daybetter-leds PROTOCOL.md, PsychedelicPalimpsest DayBetter gateway (tested live).
-- Colors are sent like the DayBetter app: `12 01 00` (solid mode) then `15 R G B FF`. A 3-byte color made the controller read
-  the checksum as the 4th byte, which is why some colors failed.
-- Built-in effects (`12 id FF`, ids 9–32), speed (`16`), strip-mic music (`12 A0 style` + `21 01`), mic sensitivity (`17`).
-- The app reads the strip's status (`10 01`) on connect, so IR-remote changes show up in the app.
-- The strip takes one BLE connection at a time: close the DayBetter app.
+### DayBetter strips: direct BLE (done, any number of strips)
+- Commands follow grimsteel/daybetter-led-strip, written for the P031: frame `A0 cmd len payload CRC16/MODBUS`, service `E031` →
+  write `A031`, notify `F031`. Color `15 R G B` (gamma + channel balance), effect `12 id`, brightness `13`, power `11`, status `10 00`.
+  Speed `16` comes from DoudGeorges/daybetter-leds PROTOCOL.md; controllers that don't know it ignore it.
+- Connect: ask for status. A strip that replies is ready. A silent one gets the CCHIP unlock (XOR 36/76, PROTOCOL.md); a strip that
+  answers neither still gets commands.
+- "Magic Light" (HC) controllers (`AE30`, `E010`, `E019`, `E01A`, `E020`, `E028`, `E02A`, `E036`, `E044`) address segments with a
+  different command set; the app names them instead of sending commands they ignore.
+- Setup lists a device as a strip by name (`P0xx_…`, Smart Light, Magic Light, Wi-Fi Light, BLE Bulb, CCHIP) or by its advertised
+  scan service (`C0xx`, `AF30`), so nameless controllers show up too.
+- Each saved strip keeps its own pending connect. The managers use restore identifiers (`strips`, `bulbs`, `bridge`), so iOS
+  relaunches the app when a light comes back (Apple TN3115; not after a force-quit or with Bluetooth off in Settings).
+- Built-in effects run on each controller's clock and drift apart; "Rainbow in sync" and phone-mic music run from the app's clock.
+- AccessorySetupKit is left out: once adopted, CoreBluetooth only sees accessories approved in Apple's picker, which would hide the
+  bulbs, the bridge, and the "show all devices" list.
+- Each strip takes one BLE connection at a time: close the DayBetter app.
 
 ### Projector: an IR bridge is the only way
 - iPhones have no IR blaster, and the projector has no radio. Something has to emit infrared.
@@ -64,7 +72,8 @@ iPhone (Dorm Remote) ──┤                                             │
 | Free Apple ID apps expire after 7 days | Install **SideStore** with iloader once; it refreshes on the phone over LocalDevVPN, no PC. Or a $99/yr developer account (1-year signing). |
 | Apple's sign-in block on sideloading tools (Oct 2026, error -80045/-80046) | iloader 2.3.10. Pick a working anisette server (StikStore or Jkcoxson) **before** signing in: iloader fixes the server at login (`account.rs`), so changing it later needs Sign Out → Sign In. Sideloadly 0.71 still fails. |
 | No timers while the app is closed | Built-in effects run on the lights themselves. Schedules: the app ships Shortcuts actions (Turn lights on/off, Set scene); use **Shortcuts → Automation → Time of Day → Run Immediately**. |
-| BLE is one connection per strip | The app releases nothing on purpose today; close the DayBetter app. |
+| BLE is one connection per strip | Close the DayBetter app. |
+| iOS caps BLE connections per phone (undocumented; varies by model) | The app names the limit error instead of a generic failure. |
 | No IR hardware | DormBridge (above). |
 | Campus Wi-Fi blocks smart devices | Everything local is BLE; only the Hubspace bulbs need internet, through the phone. |
 

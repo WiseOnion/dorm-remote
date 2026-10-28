@@ -78,7 +78,8 @@ final class BridgeController: NSObject {
 
   override init() {
     super.init()
-    central = CBCentralManager(delegate: self, queue: .main)
+    // Restore identifier: iOS keeps pending connects and relaunches the app for them (Apple TN3115).
+    central = CBCentralManager(delegate: self, queue: .main, options: [CBCentralManagerOptionRestoreIdentifierKey: "bridge"])
   }
 
   static func key(_ device: UUID, _ button: IRButton) -> String { device.uuidString + "." + button.id }
@@ -130,12 +131,25 @@ final class BridgeController: NSObject {
 }
 
 extension BridgeController: CBCentralManagerDelegate {
+  func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+    guard let p = (dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral])?.first else { return }
+    peripheral = p
+    p.delegate = self
+  }
+
   func centralManagerDidUpdateState(_ central: CBCentralManager) {
     guard central.state == .poweredOn else {
       state = .off
+      writeChar = nil
       return
     }
-    scan()
+    // A link iOS kept while the app was away: a connected bridge doesn't advertise, so scanning wouldn't find it.
+    if let peripheral, peripheral.state == .connected {
+      state = .connecting
+      peripheral.discoverServices([Self.service])
+    } else {
+      scan()
+    }
   }
 
   func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral,

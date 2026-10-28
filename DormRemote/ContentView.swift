@@ -412,7 +412,7 @@ private struct LightRow: View {
     case .ready:
       if item.caps.contains(.remote) { return "Tap for the remote" }
       guard item.on else { return "Off" }
-      if item.kind == .strip, let effect = room.effect { return effect.name }
+      if item.kind == .strip, let effect = room.effectPlaying(on: item.id) { return effect.name }
       if let effect = item.effect { return HubspaceClient.effectName(effect) }
       return item.kelvin.map { "\($0)K white" } ?? "Color"
     case .setup: return item.kind == .remote ? "Needs the IR bridge" : "Tap to set up"
@@ -574,7 +574,7 @@ private struct LightSheet: View {
         .padding(.top, 8)
       }
       .onAppear {
-        let inEffect = item.kind == .strip ? room.effect != nil : item.effect != nil
+        let inEffect = item.kind == .strip ? room.effectPlaying(on: id) != nil : item.effect != nil
         mode = inEffect ? .effects : item.kelvin != nil ? .white : .color
       }
       .sheet(isPresented: $matching) {
@@ -702,17 +702,22 @@ private struct LightSheet: View {
 
   private var stripEffects: some View {
     VStack(alignment: .leading, spacing: 20) {
+      if let playing = room.effectPlaying(on: id), playing != .phoneMic {
+        speedSlider(Double(room.speed - 1) / 99) { room.setSpeed(1 + Int(($0 * 99).rounded())) }
+      }
+      heading("In sync", "link")
+      effectCard("Rainbow in sync", colors: Effect.rainbow.map(\.color), active: room.effectPlaying(on: id) == .synced) { room.start(.synced, on: id) }
       ForEach(Effect.patternGroups, id: \.0) { group in
         heading(group.0, "sparkles")
         LazyVGrid(columns: Self.twoColumns, spacing: 12) {
           ForEach(group.1) { p in
-            effectCard(p.name, colors: p.colors.map(\.color), active: room.effect == .pattern(p.id)) { room.start(.pattern(p.id)) }
+            effectCard(p.name, colors: p.colors.map(\.color), active: room.effectPlaying(on: id) == .pattern(p.id)) { room.start(.pattern(p.id), on: id) }
           }
         }
       }
       heading("Music", "waveform")
-      effectCard("Pulse to music (phone mic)", colors: [.pink, .purple, .cyan], active: room.effect == .phoneMic) { room.start(.phoneMic) }
-      if room.effect == .phoneMic {
+      effectCard("Pulse to music (phone mic)", colors: [.pink, .purple, .cyan], active: room.effectPlaying(on: id) == .phoneMic) { room.start(.phoneMic, on: id) }
+      if room.effectPlaying(on: id) == .phoneMic {
         Capsule()
           .fill(Ink.raised)
           .overlay(alignment: .leading) {
@@ -721,7 +726,7 @@ private struct LightSheet: View {
           .frame(height: 6)
           .animation(.linear(duration: 0.05), value: room.level)
       }
-      Text("Effects run on the strip itself and keep going when you close the app. Music mode listens through your phone while the app is open.")
+      Text("Built-in effects run on each strip and keep going when you close the app, but two strips drift apart over time. \"Rainbow in sync\" and music mode run from your phone, so they stay together while the app is open.")
         .font(.footnote)
         .foregroundStyle(Ink.dim)
       if let error = room.effectError {
@@ -938,30 +943,34 @@ private struct StripSetup: View {
   @Environment(\.dismiss) private var dismiss
 
   var body: some View {
-    let strips = strip.devices.filter { Daybetter.looksLikeStrip($0.name) }
-    let others = strip.devices.filter { !Daybetter.looksLikeStrip($0.name) }
+    let isStrip = { (d: FoundDevice) in d.daybetter || Daybetter.looksLikeStrip(d.name) }
+    let strips = strip.devices.filter(isStrip)
+    let others = strip.devices.filter { !isStrip($0) }
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Add your LED strip").font(.system(.title, design: .rounded, weight: .bold))
-          Text("Close the DayBetter app first. The strip only talks to one app at a time.")
+          Text(strip.strips.isEmpty ? "Add your LED strip" : "Add another LED strip").font(.system(.title, design: .rounded, weight: .bold))
+          Text("Close the DayBetter app first. The strip only talks to one app at a time. Strips you've already added stay connected and aren't listed.")
             .foregroundStyle(Ink.dim)
         }
 
-        switch strip.state {
-        case .connecting, .unlocking:
+        if !strip.bluetoothOn {
+          Text("Turn on Bluetooth.").foregroundStyle(Ink.dim)
+        } else if case .failed(let message) = strip.adding?.state {
+          Text(message).foregroundStyle(Ink.bad)
+          Button("Try again") {
+            strip.cancelAdding()
+            strip.scan()
+          }
+          .frame(minHeight: 44)
+        } else if strip.adding != nil {
           HStack(spacing: 12) {
             ProgressView()
             Text("Connecting…").foregroundStyle(Ink.dim)
             Spacer()
-            Button("Cancel") { strip.cancelConnecting() }.frame(minHeight: 44)
+            Button("Cancel") { strip.cancelAdding() }.frame(minHeight: 44)
           }
-        case .off:
-          Text("Turn on Bluetooth.").foregroundStyle(Ink.dim)
-        case .failed(let message):
-          Text(message).foregroundStyle(Ink.bad)
-          Button("Try again") { strip.scan() }.frame(minHeight: 44)
-        default:
+        } else {
           if strips.isEmpty {
             HStack(spacing: 12) {
               ProgressView()
@@ -1009,8 +1018,13 @@ private struct StripSetup: View {
       }
       .padding(24)
     }
-    .onAppear { if strip.state == .idle { strip.scan() } }
-    .onChange(of: strip.state) { _, new in if new == .connected { dismiss() } }
+    .onAppear {
+      if case .failed = strip.adding?.state { strip.cancelAdding() }
+      strip.scan()
+    }
+    .onDisappear { strip.stopScan() }
+    // The picked strip connected and joined the list.
+    .onChange(of: strip.strips.count) { old, new in if new > old { dismiss() } }
   }
 }
 
