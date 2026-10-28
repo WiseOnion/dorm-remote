@@ -3,16 +3,42 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-// Design: black canvas, flat cards, and each light's own color as the only accent.
+// Design, "night room": a near-black canvas, cards with a hairline edge, and the lights' own colors as the
+// accent. Lit tiles carry a tint of their color, and the background glows with whatever is on.
 // Layout follows the Hubspace light screen (mode circles, brightness bar, presets, wheel)
 // with DayBetter's patterns and music on top.
 private enum Ink {
-  static let bg = Color.black
-  static let card = Color(hex: 0x141416)
-  static let raised = Color(hex: 0x232328)
+  static let bg = Color(hex: 0x07070B)
+  static let card = Color(hex: 0x121218)
+  static let raised = Color(hex: 0x1F1F27)
+  /// Card edge: light enough to separate a card from the canvas, quiet enough to disappear.
+  static let line = Color.white.opacity(0.07)
   static let text = Color(hex: 0xF5F5F7)
-  static let dim = Color(hex: 0x8E8E93)
+  /// Secondary text: 7.3:1 on cards, 6.4:1 on raised fills (WCAG AA needs 4.5).
+  static let dim = Color(hex: 0xA1A1AA)
   static let bad = Color(hex: 0xFF6B5E)
+  /// The app icon's strip, warm to cool. Only for the wordmark.
+  static let brand = [Color(hex: 0xFF7A30), Color(hex: 0xFF2D78), Color(hex: 0xC56BFF), Color(hex: 0x6E9BFF), Color(hex: 0x00D9FF)]
+}
+
+/// A card: the base surface for rows and panels. `tint` washes it with a light's color while it's on.
+private struct Card: ViewModifier {
+  var tint: Color?
+  var radius: CGFloat = 24
+
+  func body(content: Content) -> some View {
+    let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+    content.background(
+      shape.fill(Ink.card)
+        // 12 %: secondary text stays above 5:1 even on a tile lit pure white.
+        .overlay(shape.fill(LinearGradient(colors: [(tint ?? .clear).opacity(0.12), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)))
+        .overlay(shape.strokeBorder(tint.map { $0.opacity(0.22) } ?? Ink.line, lineWidth: 1))
+    )
+  }
+}
+
+extension View {
+  fileprivate func card(tint: Color? = nil, radius: CGFloat = 24) -> some View { modifier(Card(tint: tint, radius: radius)) }
 }
 
 /// Pressed state for every custom button: a slight shrink and dim on a spring, so taps feel answered
@@ -23,9 +49,10 @@ private struct Press: ButtonStyle {
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
       .contentShape(Rectangle())
-      .scaleEffect(configuration.isPressed && !reduceMotion ? 0.96 : 1)
-      .opacity(configuration.isPressed ? 0.8 : 1)
-      .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
+      .scaleEffect(configuration.isPressed && !reduceMotion ? 0.97 : 1)
+      .opacity(configuration.isPressed ? 0.85 : 1)
+      // Quick in, settle out: the press answers at once, the release eases back.
+      .animation(reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.22, dampingFraction: 0.75), value: configuration.isPressed)
   }
 }
 
@@ -61,6 +88,7 @@ struct ContentView: View {
   @State private var sceneName = ""
   @State private var photo: PhotosPickerItem?
   @State private var photoError = false
+  @Namespace private var tabs
 
   private enum RoomEdit: Equatable { case add, rename(String) }
 
@@ -83,10 +111,30 @@ struct ContentView: View {
         .padding(.top, 16)
         ForEach(room.inRoom) { item in row(item) }
         if room.inRoom.isEmpty {
-          Text("Nothing in \(room.currentRoom) yet. Tap Add, or move a device here from its settings.")
-            .font(.subheadline)
-            .foregroundStyle(Ink.dim)
-            .frame(maxWidth: .infinity, alignment: .leading)
+          VStack(spacing: 16) {
+            Image(systemName: "light.strip.2")
+              .font(.system(size: 28, weight: .medium))
+              .foregroundStyle(LinearGradient(colors: Ink.brand, startPoint: .leading, endPoint: .trailing))
+            VStack(spacing: 4) {
+              Text("Nothing in \(room.currentRoom) yet").font(.headline)
+              Text("Add a light, or move one here from its settings.")
+                .font(.subheadline)
+                .foregroundStyle(Ink.dim)
+                .multilineTextAlignment(.center)
+            }
+            Button { sheet = .add } label: {
+              Text("Add a light")
+                .font(.body.weight(.semibold))
+                .padding(.horizontal, 24)
+                .frame(minHeight: 48)
+                .foregroundStyle(.black)
+                .background(Capsule().fill(Ink.text))
+            }
+            .buttonStyle(Press())
+          }
+          .frame(maxWidth: .infinity)
+          .padding(24)
+          .card()
         }
         Text("Swipe left on a device to remove it.")
           .font(.footnote)
@@ -136,6 +184,7 @@ struct ContentView: View {
       }
       .presentationDragIndicator(.visible)
       .presentationBackground(Ink.card)
+      .presentationCornerRadius(32)
       .preferredColorScheme(.dark)
     }
     .confirmationDialog("Remove \(removing?.name ?? "this device")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
@@ -174,13 +223,22 @@ struct ContentView: View {
       HStack(spacing: 8) {
         ForEach(room.rooms, id: \.self) { name in
           let selected = room.currentRoom == name
-          Button { room.selectedRoom = name } label: {
+          Button {
+            withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.3, dampingFraction: 0.85)) { room.selectedRoom = name }
+          } label: {
             Text(name)
               .font(.subheadline.weight(.semibold))
               .padding(.horizontal, 16)
               .frame(minHeight: 44)
               .foregroundStyle(selected ? .black : Ink.text)
-              .background(Capsule().fill(selected ? Ink.text : Ink.raised))
+              .background {
+                // The selected pill slides between rooms instead of jumping.
+                if selected {
+                  Capsule().fill(Ink.text).matchedGeometryEffect(id: "roomTab", in: tabs)
+                } else {
+                  Capsule().fill(Ink.raised)
+                }
+              }
           }
           .buttonStyle(Press())
           .accessibilityAddTraits(selected ? .isSelected : [])
@@ -210,22 +268,31 @@ struct ContentView: View {
     .sensoryFeedback(.selection, trigger: room.currentRoom)
   }
 
+  /// The room's light spills onto the screen: a wide glow from the top, and a fainter pool at the bottom.
   private var glow: some View {
     ZStack {
       Ink.bg
       if let ambient = room.ambient {
-        RadialGradient(colors: [ambient.opacity(0.4), .clear], center: .top, startRadius: 0, endRadius: 480)
+        RadialGradient(colors: [ambient.opacity(0.42), ambient.opacity(0.08), .clear], center: .top, startRadius: 0, endRadius: 520)
+        RadialGradient(colors: [ambient.opacity(0.12), .clear], center: .bottom, startRadius: 0, endRadius: 420)
       }
     }
     .ignoresSafeArea()
-    .animation(reduceMotion ? nil : .easeOut(duration: 0.4), value: room.ambient)
+    // A color change in the room is worth a slow, soft crossfade; it's the mood, not a control.
+    .animation(.easeInOut(duration: 0.6), value: room.ambient)
   }
 
   private var header: some View {
     HStack(alignment: .center, spacing: 8) {
       VStack(alignment: .leading, spacing: 4) {
+        Text("DORM REMOTE")
+          .font(.caption2.weight(.heavy))
+          .tracking(2.5)
+          .foregroundStyle(LinearGradient(colors: Ink.brand, startPoint: .leading, endPoint: .trailing))
+          .accessibilityHidden(true)
         Text(room.currentRoom)
           .font(.system(.largeTitle, design: .rounded, weight: .bold))
+          .contentTransition(.opacity)
         Text(summary)
           .font(.subheadline)
           .foregroundStyle(Ink.dim)
@@ -332,6 +399,8 @@ struct ContentView: View {
           .frame(width: 60, height: 60)
           .padding(4)
           .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
+          .shadow(color: room.mood == mood.id ? mood.swatch[0].opacity(0.55) : .clear, radius: 12)
+          .animation(.easeOut(duration: 0.2), value: room.mood)
           .overlay(alignment: .topTrailing) {
             if room.favorites.contains(mood.id) {
               Image(systemName: "star.fill").font(.system(size: 11)).foregroundStyle(.yellow)
@@ -532,7 +601,7 @@ private struct LightRow: View {
       }
     }
     .padding(16)
-    .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.card))
+    .card(tint: item.status == .ready && item.on && !item.caps.contains(.remote) ? item.glow.color : nil)
     .opacity(item.kind == .remote && item.status != .ready ? 0.55 : 1)
     .contentShape(RoundedRectangle(cornerRadius: 24))
     .onTapGesture(perform: open)
