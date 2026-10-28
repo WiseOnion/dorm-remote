@@ -29,9 +29,10 @@ private struct Press: ButtonStyle {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log
+  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log, automations
   var id: String {
     switch self {
+    case .automations: "automations"
     case .light(let id): "light-" + id
     case .stripSetup: "strip"
     case .hubSetup: "hub"
@@ -123,6 +124,7 @@ struct ContentView: View {
           }
         }
         case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
+        case .automations: AutomationsSheet()
         }
       }
       .presentationDragIndicator(.visible)
@@ -223,6 +225,7 @@ struct ContentView: View {
       }
       Spacer()
       Menu {
+        Button("Schedules & automations", systemImage: "alarm") { sheet = .automations }
         Button("Find my lights", systemImage: "viewfinder") { sheet = .scan }
         Button("Room map", systemImage: "map") { sheet = .map }
         Button("Turn everything off", systemImage: "power") { room.setPower(Room.everything, false) }
@@ -1275,6 +1278,58 @@ private struct HubSetup: View {
     .buttonStyle(Press())
     .disabled(disabled)
     .opacity(disabled ? 0.4 : 1)
+  }
+}
+
+/// Recipes for the Shortcuts actions in Intents.swift. iOS runs automations even with the app closed, which is
+/// how schedules work here: an app can't keep its own timers running in the background.
+private struct AutomationsSheet: View {
+  @Environment(\.openURL) private var openURL
+
+  private static let recipes: [(icon: String, title: String, how: String)] = [
+    ("sunrise", "Wake up to light", "Automation → Alarm → Is Stopped → Run Immediately → Dorm Remote: Set scene → Sunrise."),
+    ("moon.zzz", "Fade out at bedtime", "Automation → Sleep (Focus) → Turns On → Run Immediately → Dorm Remote: Fade lights out."),
+    ("clock", "Lights on at a set time", "Automation → Time of Day → pick a time → Run Immediately → Dorm Remote: Set scene."),
+    ("button.horizontal.top.press", "Action Button", "Settings → Action Button → Shortcut → Dorm Remote: Toggle lights."),
+    ("switch.2", "Control Center", "Open Control Center → + → Add a Control → Shortcuts → Dorm Remote: Toggle lights."),
+    ("mic", "Siri", "Say \"Toggle Dorm Remote\", \"Goodnight Dorm Remote\", or \"Set Dorm Remote scene\"."),
+  ]
+
+  var body: some View {
+    ScrollView {
+      VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Schedules & automations").font(.system(.title, design: .rounded, weight: .bold))
+          Text("Set these up once in the Shortcuts app. They run on their own, even when Dorm Remote is closed.")
+            .foregroundStyle(Ink.dim)
+        }
+        ForEach(Self.recipes, id: \.title) { r in
+          HStack(alignment: .top, spacing: 16) {
+            Image(systemName: r.icon)
+              .frame(width: 44, height: 44)
+              .background(Circle().fill(Ink.raised))
+            VStack(alignment: .leading, spacing: 4) {
+              Text(r.title).font(.body.weight(.semibold))
+              Text(r.how).font(.footnote).foregroundStyle(Ink.dim).fixedSize(horizontal: false, vertical: true)
+            }
+          }
+        }
+        Button {
+          if let url = URL(string: "shortcuts://") { openURL(url) }
+        } label: {
+          Text("Open Shortcuts")
+            .font(.body.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .foregroundStyle(.black)
+            .background(Capsule().fill(.white))
+        }
+        .buttonStyle(Press())
+        Text("Swiping Dorm Remote away in the app switcher stops iOS from reconnecting your lights in the background until you open it again.")
+          .font(.footnote)
+          .foregroundStyle(Ink.dim)
+      }
+      .padding(24)
+    }
   }
 }
 
