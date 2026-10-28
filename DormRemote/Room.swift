@@ -149,6 +149,22 @@ struct Mood: Identifiable, Codable {
     }
   }
 
+  /// The photo shrunk to 48×48, as pixels. Small is plenty for picking colors and keeps it instant.
+  static func pixels(ofImage data: Data) -> [RGB] {
+    guard let image = UIImage(data: data)?.cgImage else { return [] }
+    let side = 48
+    var buffer = [UInt8](repeating: 0, count: side * side * 4)
+    let drawn = buffer.withUnsafeMutableBytes { raw -> Bool in
+      guard let ctx = CGContext(data: raw.baseAddress, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+      ctx.interpolationQuality = .medium
+      ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+      return true
+    }
+    guard drawn else { return [] }
+    return stride(from: 0, to: buffer.count, by: 4).map { RGB(r: Int(buffer[$0]), g: Int(buffer[$0 + 1]), b: Int(buffer[$0 + 2])) }
+  }
+
   /// Picks a few colors that stand out in a photo: drops dark and gray pixels, groups the rest by hue,
   /// and averages the biggest groups. Returned brightest-group first.
   static func palette(from pixels: [RGB], count: Int = 4) -> [RGB] {

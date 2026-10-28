@@ -1,4 +1,5 @@
 import ARKit
+import PhotosUI
 import SwiftUI
 import UIKit
 
@@ -57,6 +58,8 @@ struct ContentView: View {
   @State private var roomName = ""
   @State private var savingScene = false
   @State private var sceneName = ""
+  @State private var photo: PhotosPickerItem?
+  @State private var photoError = false
 
   private enum RoomEdit: Equatable { case add, rename(String) }
 
@@ -260,7 +263,7 @@ struct ContentView: View {
       SectionTitle("Scenes")
       let favorites = room.moods.filter { room.favorites.contains($0.id) }
       if !favorites.isEmpty { sceneRow("Favorites", favorites) }
-      sceneRow(Mood.Group.mine.rawValue, room.customScenes, leading: AnyView(saveTile))
+      sceneRow(Mood.Group.mine.rawValue, room.customScenes, leading: AnyView(HStack(alignment: .top, spacing: 16) { saveTile; photoTile }))
       ForEach(Mood.Group.allCases.filter { $0 != .mine }, id: \.self) { group in
         sceneRow(group.rawValue, Mood.all.filter { $0.group == group })
       }
@@ -326,6 +329,40 @@ struct ContentView: View {
       if mood.group == .mine {
         Button("Delete scene", systemImage: "trash", role: .destructive) { room.deleteScene(mood.id) }
       }
+    }
+  }
+
+  /// The system photo picker needs no photo-library permission: the app only gets the one picture you choose.
+  private var photoTile: some View {
+    PhotosPicker(selection: $photo, matching: .images) {
+      VStack(spacing: 8) {
+        Image(systemName: "photo.on.rectangle.angled")
+          .font(.title3.weight(.semibold))
+          .frame(width: 60, height: 60)
+          .background(Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])))
+          .padding(4)
+        Text("From photo").font(.caption.weight(.medium)).foregroundStyle(Ink.dim).frame(width: 72)
+      }
+    }
+    .buttonStyle(Press())
+    .accessibilityLabel("Make a scene from a photo")
+    .onChange(of: photo) { _, item in
+      guard let item else { return }
+      Task {
+        let data = try? await item.loadTransferable(type: Data.self)
+        photo = nil
+        let colors = data.map { Mood.palette(from: Mood.pixels(ofImage: $0)) } ?? []
+        if colors.isEmpty {
+          photoError = true
+        } else {
+          room.savePalette(colors, named: "Photo")
+        }
+      }
+    }
+    .alert("No strong colors", isPresented: $photoError) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text("That photo is mostly gray or dark. Try one with bolder colors.")
     }
   }
 

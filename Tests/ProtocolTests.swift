@@ -1,4 +1,5 @@
 import CoreBluetooth
+import UIKit
 import XCTest
 @testable import DormRemote
 
@@ -212,6 +213,23 @@ final class LookTests: XCTestCase {
     let palette = Mood.palette(from: pixels)
     XCTAssertEqual(palette, [RGB(r: 230, g: 20, b: 30), RGB(r: 20, g: 40, b: 220)])
     XCTAssertEqual(Mood.palette(from: Array(repeating: RGB(r: 128, g: 128, b: 128), count: 10)), [])
+  }
+
+  func testPaletteFromRealImage() throws {
+    // Left half orange, right half blue, as a PNG, through the same path a picked photo takes.
+    let image = UIGraphicsImageRenderer(size: CGSize(width: 200, height: 100)).image { ctx in
+      UIColor(red: 1, green: 0.4, blue: 0, alpha: 1).setFill()
+      ctx.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
+      UIColor(red: 0, green: 0.2, blue: 1, alpha: 1).setFill()
+      ctx.fill(CGRect(x: 100, y: 0, width: 100, height: 100))
+    }
+    let pixels = Mood.pixels(ofImage: try XCTUnwrap(image.pngData()))
+    XCTAssertEqual(pixels.count, 48 * 48)
+    let palette = Mood.palette(from: pixels)
+    // Resampling can blend a column at the seam into a third, small group.
+    XCTAssertGreaterThanOrEqual(palette.count, 2)
+    XCTAssertTrue(palette.contains { $0.r > 200 && $0.b < 60 }, "orange missing: \(palette)")
+    XCTAssertTrue(palette.contains { $0.b > 200 && $0.r < 60 }, "blue missing: \(palette)")
   }
 
   func testVividKeepsHueAndWhite() {
