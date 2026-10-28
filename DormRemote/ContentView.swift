@@ -1129,7 +1129,19 @@ private struct ColorWheel: View {
 private struct StripSetup: View {
   var strip: StripController
   @State private var showOthers = false
+  /// Nothing turned up after a few seconds: show the fixes.
+  @State private var slowSearch = false
   @Environment(\.dismiss) private var dismiss
+
+  // DayBetter FAQ (daybetter.net) and what the app itself needs.
+  private static let tips = [
+    "Swipe the DayBetter app away in the app switcher. A strip talks to one app at a time.",
+    "Unplug the strip's power for 10 seconds, then plug it back in.",
+    "Turn Bluetooth off and on in Control Center.",
+    "Move closer. The controller box is the part with the antenna.",
+    "Strips you've already added stay connected and don't show up here. Check the Lights list.",
+    "Some controllers use other names: open \"Show all Bluetooth devices\" below.",
+  ]
 
   var body: some View {
     let isStrip = { (d: FoundDevice) in d.daybetter || Daybetter.looksLikeStrip(d.name) }
@@ -1164,6 +1176,20 @@ private struct StripSetup: View {
             HStack(spacing: 12) {
               ProgressView()
               Text("Looking for DayBetter strips…").foregroundStyle(Ink.dim)
+            }
+            if slowSearch {
+              VStack(alignment: .leading, spacing: 12) {
+                Text("Not showing up? Try these").font(.subheadline.weight(.semibold))
+                ForEach(Self.tips, id: \.self) { tip in
+                  Label(tip, systemImage: "checkmark.circle")
+                    .font(.footnote)
+                    .foregroundStyle(Ink.dim)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+              }
+              .padding(16)
+              .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+              .transition(.opacity)
             }
           }
           ForEach(strips) { device in
@@ -1212,6 +1238,10 @@ private struct StripSetup: View {
       strip.scan()
     }
     .onDisappear { strip.stopScan() }
+    .task {
+      try? await Task.sleep(for: .seconds(8))
+      withAnimation(.easeOut(duration: 0.25)) { slowSearch = true }
+    }
     // The picked strip connected and joined the list.
     .onChange(of: strip.strips.count) { old, new in if new > old { dismiss() } }
   }
