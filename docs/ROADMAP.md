@@ -50,7 +50,7 @@ Hue Lights (apps.apple.com/us/app/hue-lights/id762009425); Philips Hue app updat
    - "Set my spot": stand outside your door and the app records the strip's signal strength there; on the way back it
      waits for at least that signal. Reading signal strength in the background isn't documented, so if iOS doesn't
      allow it, the lights come on at reconnect.
-   - Walk out (optional): every strip gone for 5 minutes turns the room off.
+   - No walk out: once you're out of Bluetooth range the app can't reach the strips to turn them off.
    - Limits: a force-quit app isn't woken; it follows your phone, not a roommate's. Coarse GPS fallback with no code:
      Shortcuts → Arrive → Dorm Remote: Turn lights on (runs without asking since iOS 17).
 10. **Redesign**: same screens and features, better look and feel (type, depth, motion, haptics).

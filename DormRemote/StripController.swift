@@ -463,6 +463,21 @@ final class StripController: NSObject {
     }
     // Ask for the current state so the app matches whatever the remote or DayBetter app set.
     send(strip.id, Daybetter.frame(Daybetter.status, [0x00]))
+    onConnect?(strip.id)
+  }
+
+  /// Called on the main queue when a saved strip is ready, and when one drops out of range. Walk in uses them.
+  var onConnect: ((UUID) -> Void)?
+  var onDrop: ((UUID) -> Void)?
+
+  @ObservationIgnored private var rssiReplies: [UUID: [(Int?) -> Void]] = [:]
+
+  /// Signal strength in dBm (closer is higher, about -40 next to it, -90 at the edge). Nil if the strip isn't
+  /// connected or the read fails.
+  func readRSSI(_ id: UUID, _ reply: @escaping (Int?) -> Void) {
+    guard let strip = lookup(id), strip.state == .connected, let p = strip.peripheral else { return reply(nil) }
+    rssiReplies[id, default: []].append(reply)
+    if rssiReplies[id]?.count == 1 { p.readRSSI() }
   }
 
   private func save() {
@@ -576,8 +591,12 @@ extension StripController: CBCentralManagerDelegate {
       return
     }
     // The strip dropped (unplugged, out of range): wait for it to come back.
+    let wasConnected = strip.state == .connected
     strip.state = .idle
     central.connect(peripheral)
+    // A read that will never come back.
+    rssiReplies.removeValue(forKey: strip.id)?.forEach { $0(nil) }
+    if wasConnected { onDrop?(strip.id) }
   }
 }
 
@@ -646,5 +665,11 @@ extension StripController: CBPeripheralDelegate {
 
   func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
     if let strip = lookup(peripheral.identifier) { flushPending(strip) }
+  }
+
+  func peripheral(_ peripheral: CBPeripheral, didReadRSSI RSSI: NSNumber, error: Error?) {
+    // 127 means "unavailable" in CoreBluetooth.
+    let value = error == nil && RSSI.intValue != 127 ? RSSI.intValue : nil
+    rssiReplies.removeValue(forKey: peripheral.identifier)?.forEach { $0(value) }
   }
 }

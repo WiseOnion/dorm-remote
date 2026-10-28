@@ -30,9 +30,10 @@ private struct Press: ButtonStyle {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log, automations
+  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, scan, map, log, automations, walkIn
   var id: String {
     switch self {
+    case .walkIn: "walkIn"
     case .automations: "automations"
     case .light(let id): "light-" + id
     case .stripSetup: "strip"
@@ -130,6 +131,7 @@ struct ContentView: View {
         }
         case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
         case .automations: AutomationsSheet()
+        case .walkIn: WalkInSheet(room: room)
         }
       }
       .presentationDragIndicator(.visible)
@@ -230,6 +232,7 @@ struct ContentView: View {
       }
       Spacer()
       Menu {
+        Button("Walk in", systemImage: "figure.walk.arrival") { sheet = .walkIn }
         Button("Schedules & automations", systemImage: "alarm") { sheet = .automations }
         Button("Find my lights", systemImage: "viewfinder") { sheet = .scan }
         Button("Room map", systemImage: "map") { sheet = .map }
@@ -1456,6 +1459,88 @@ private struct HubSetup: View {
     .buttonStyle(Press())
     .disabled(disabled)
     .opacity(disabled ? 0.4 : 1)
+  }
+}
+
+/// Walk in settings: light up when you get home (WalkIn.swift).
+private struct WalkInSheet: View {
+  var room: Room
+
+  var body: some View {
+    let walkIn = room.walkIn
+    ScrollView {
+      VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("Walk in").font(.system(.title, design: .rounded, weight: .bold))
+          Text("Your room lights up when you get back. Your strips are the sensor: when you've been gone 10 minutes and your phone comes back into a strip's Bluetooth range, the lights come on. No GPS, no extra hardware.")
+            .foregroundStyle(Ink.dim)
+        }
+
+        Toggle(isOn: Binding(get: { walkIn.enabled }, set: { walkIn.enabled = $0 })) {
+          Text("Light up when I get home").font(.body.weight(.semibold))
+        }
+        .frame(minHeight: 44)
+
+        HStack {
+          Text("What comes on")
+          Spacer()
+          Picker("What comes on", selection: Binding(get: { walkIn.sceneID }, set: { walkIn.sceneID = $0 })) {
+            Text("Lights as they were").tag(String?.none)
+            ForEach(room.moods) { Text($0.id).tag(Optional($0.id)) }
+          }
+          .pickerStyle(.menu)
+        }
+        .frame(minHeight: 44)
+        .disabled(!walkIn.enabled)
+
+        VStack(alignment: .leading, spacing: 12) {
+          Text("Your spot").font(.headline)
+          Text(walkIn.spot == nil
+               ? "Not set: the lights come on as soon as a strip is back in range, which is about your hallway. Stand right outside your door and tap Set my spot to make them wait until you're there."
+               : "Set: on the way back, the lights wait until you're about as close as where you stood.")
+            .font(.subheadline)
+            .foregroundStyle(Ink.dim)
+            .fixedSize(horizontal: false, vertical: true)
+          HStack(spacing: 12) {
+            Button {
+              walkIn.setSpot()
+            } label: {
+              HStack(spacing: 8) {
+                if walkIn.measuring { ProgressView().tint(.black) }
+                Text(walkIn.measuring ? "Measuring…" : walkIn.spot == nil ? "Set my spot" : "Set it again")
+              }
+              .font(.body.weight(.semibold))
+              .frame(maxWidth: .infinity, minHeight: 52)
+              .foregroundStyle(.black)
+              .background(Capsule().fill(.white))
+            }
+            .buttonStyle(Press())
+            .disabled(walkIn.measuring)
+            if walkIn.spot != nil {
+              Button("Clear") { walkIn.clearSpot() }
+                .frame(minWidth: 64, minHeight: 52)
+            }
+          }
+          if let error = walkIn.spotError {
+            Text(error).font(.footnote).foregroundStyle(Ink.bad)
+          }
+        }
+        .disabled(!walkIn.enabled)
+        .opacity(walkIn.enabled ? 1 : 0.5)
+
+        if let last = walkIn.lastArrival {
+          Label("Last welcome home: \(last.formatted(date: .abbreviated, time: .shortened))", systemImage: "house")
+            .font(.footnote)
+            .foregroundStyle(Ink.dim)
+        }
+
+        Text("It follows your phone, so a roommate coming in won't trigger it. Keep Bluetooth on and leave Dorm Remote in the app switcher: swiping it away stops iOS from waking it until you open it again.")
+          .font(.footnote)
+          .foregroundStyle(Ink.dim)
+      }
+      .padding(24)
+    }
+    .sensoryFeedback(.success, trigger: walkIn.spot)
   }
 }
 

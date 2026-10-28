@@ -327,7 +327,16 @@ final class Room {
     strip.onStatus = { [weak self] id, status in
       MainActor.assumeIsolated { self?.apply(status, to: id) }
     }
+    walkIn.room = self
+    strip.onConnect = { [weak self] id in
+      MainActor.assumeIsolated { self?.walkIn.stripConnected(id) }
+    }
+    strip.onDrop = { [weak self] _ in
+      MainActor.assumeIsolated { self?.walkIn.stripDropped() }
+    }
   }
+
+  let walkIn = WalkIn()
 
   /// The strip's own report wins over what we remember, so IR remote changes show up here.
   private func apply(_ status: StripStatus, to id: UUID) {
