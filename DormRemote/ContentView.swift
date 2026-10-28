@@ -174,7 +174,6 @@ struct ContentView: View {
           .contentTransition(.numericText())
         roomTabs
         nowPlaying
-        scenes.padding(.top, 8)
         HStack {
           SectionTitle("Lights")
           Spacer()
@@ -184,7 +183,7 @@ struct ContentView: View {
           .buttonStyle(Press())
           .frame(minHeight: 44)
         }
-        .padding(.top, 16)
+        .padding(.top, 8)
         ForEach(room.inRoom) { item in row(item) }
         if room.inRoom.isEmpty {
           VStack(spacing: 16) {
@@ -212,6 +211,7 @@ struct ContentView: View {
           .padding(24)
           .card()
         }
+        scenes.padding(.top, 16)
         Color.clear.frame(height: 16)
       }
       .listRowBackground(Color.clear)
@@ -421,7 +421,7 @@ struct ContentView: View {
         SectionTitle("Scenes")
         Spacer()
         Button { room.living.toggle() } label: {
-          Label("Living", systemImage: room.living ? "wind" : "pause.circle")
+          Label("Drift", systemImage: room.living ? "wind" : "pause.circle")
             .font(.subheadline.weight(.semibold))
             .padding(.horizontal, 14)
             .frame(minHeight: 44)
@@ -429,7 +429,7 @@ struct ContentView: View {
             .background(Capsule().fill(room.living ? Ink.text : Ink.raised))
         }
         .buttonStyle(Press())
-        .accessibilityLabel("Living scenes")
+        .accessibilityLabel("Drift")
         .accessibilityValue(room.living ? "On" : "Off")
         .accessibilityHint("Color scenes drift slowly from light to light")
       }
@@ -620,7 +620,11 @@ extension ContentView {
                 Orb(item: item, size: 36)
                 VStack(alignment: .leading, spacing: 2) {
                   Text(item.name).foregroundStyle(Ink.text)
-                  Text(room.roomOf(item)).font(.footnote).foregroundStyle(Ink.dim)
+                  if case .offline(let why) = item.status {
+                    Text(why).font(.footnote).foregroundStyle(Ink.bad)
+                  } else {
+                    Text(room.roomOf(item)).font(.footnote).foregroundStyle(Ink.dim)
+                  }
                 }
                 Spacer()
                 Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
@@ -672,6 +676,9 @@ extension ContentView {
         .listRowBackground(Ink.card)
         Section("Help") {
           Button { sheet = .log } label: { Label("Activity log", systemImage: "doc.text") }
+          Button {
+            if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+          } label: { Label("Bluetooth and location access", systemImage: "hand.raised") }
           LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
         }
         .listRowBackground(Ink.card)
@@ -1748,7 +1755,6 @@ private struct WalkInSection: View {
     let walkIn = room.walkIn
     VStack(alignment: .leading, spacing: 28) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Walk in").font(.system(.title2, design: .rounded, weight: .bold))
           Text("Your room lights up when you get back. Your strips are the sensor: once you've been gone a while and your phone comes back into a strip's Bluetooth range, the lights come on.")
             .foregroundStyle(Ink.dim)
         }
@@ -1922,7 +1928,6 @@ private struct ScheduleSection: View {
   var body: some View {
       VStack(alignment: .leading, spacing: 20) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Schedules").font(.system(.title2, design: .rounded, weight: .bold))
           Text("Set these up once in the Shortcuts app. They run on their own, even when Dorm Remote is closed.")
             .foregroundStyle(Ink.dim)
         }
@@ -1947,24 +1952,27 @@ private struct ScheduleSection: View {
             .background(Capsule().fill(Ink.text))
         }
         .buttonStyle(Press())
-        Text("Swiping Dorm Remote away in the app switcher stops iOS from reconnecting your lights in the background until you open it again.")
-          .font(.footnote)
-          .foregroundStyle(Ink.dim)
       }
   }
 }
 
-/// The Automations tab: things that happen without you opening the app.
+/// The Automations tab, like Hue's and Google Home's: one card per automation with its switch and what it will do;
+/// the settings are one tap deeper, so the tab reads at a glance.
 private struct AutomationsTab: View {
   var room: Room
+  @State private var walkInOpen = false
+  @State private var schedulesOpen = false
 
   var body: some View {
+    let walkIn = room.walkIn
     NavigationStack {
       ScrollView {
-        VStack(alignment: .leading, spacing: 32) {
-          WalkInSection(room: room)
-          Rectangle().fill(Ink.line).frame(height: 1)
-          ScheduleSection()
+        VStack(alignment: .leading, spacing: 12) {
+          SectionTitle("Automatic")
+          card(icon: "figure.walk.arrival", title: "Walk in", detail: walkInSummary(walkIn),
+               on: Binding(get: { walkIn.enabled }, set: { walkIn.enabled = $0 })) { walkInOpen = true }
+          SectionTitle("With Shortcuts").padding(.top, 20)
+          card(icon: "clock", title: "Schedules", detail: "Wake up, bedtime, a set time, Siri and the Action Button", on: nil) { schedulesOpen = true }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
@@ -1973,7 +1981,59 @@ private struct AutomationsTab: View {
       .background(RoomGlow(room: room))
       .foregroundStyle(Ink.text)
       .navigationTitle("Automations")
+      .navigationDestination(isPresented: $walkInOpen) { page("Walk in") { WalkInSection(room: room) } }
+      .navigationDestination(isPresented: $schedulesOpen) { page("Schedules") { ScheduleSection() } }
     }
+  }
+
+  private func walkInSummary(_ walkIn: WalkIn) -> String {
+    guard walkIn.enabled else { return "Off" }
+    let what = walkIn.sceneID ?? "Lights as they were"
+    if let last = walkIn.events.first {
+      return "\(what) · last: \(last.time.formatted(date: .omitted, time: .shortened))"
+    }
+    return "\(what) after \(walkIn.awayMinutes) min away"
+  }
+
+  private func card(icon: String, title: String, detail: String, on: Binding<Bool>?, open: @escaping () -> Void) -> some View {
+    HStack(spacing: 14) {
+      Button(action: open) {
+        HStack(spacing: 14) {
+          Image(systemName: icon)
+            .font(.body.weight(.semibold))
+            .frame(width: 44, height: 44)
+            .foregroundStyle(on?.wrappedValue == true ? .black : Ink.text)
+            .background(Circle().fill(on?.wrappedValue == true ? Ink.text : Ink.raised))
+          VStack(alignment: .leading, spacing: 2) {
+            Text(title).font(.body.weight(.semibold))
+            Text(detail).font(.footnote).foregroundStyle(Ink.dim).lineLimit(2)
+          }
+          Spacer(minLength: 0)
+          if on == nil { Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim) }
+        }
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(Press())
+      if let on {
+        Toggle(title, isOn: on).labelsHidden()
+      }
+    }
+    .padding(16)
+    .card()
+    .animation(Motion.state, value: on?.wrappedValue)
+  }
+
+  private func page<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
+    ScrollView {
+      content()
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+    }
+    .scrollIndicators(.hidden)
+    .background(RoomGlow(room: room))
+    .foregroundStyle(Ink.text)
+    .navigationTitle(title)
+    .navigationBarTitleDisplayMode(.inline)
   }
 }
 
@@ -2273,15 +2333,17 @@ private struct MapScreen: View {
 
   private var header: some View {
     VStack(alignment: .leading, spacing: 16) {
-      Text("Tap a light to make it blink. Drag lights to where they are, and the white dot to where you usually sit.")
+      let placed = room.inRoom.contains { room.placements[$0.id] != nil }
+      Text(placed ? "Tap a light to blink it. Drag lights, and the white dot, to where they really are."
+                  : "Your phone's camera finds each light while it blinks, then puts it on the map.")
         .font(.subheadline)
         .foregroundStyle(Ink.dim)
       Button { scanning = true } label: {
-        Label("Find my lights with the camera", systemImage: "viewfinder")
+        Label(placed ? "Scan again" : "Find my lights with the camera", systemImage: "viewfinder")
           .font(.body.weight(.semibold))
           .frame(maxWidth: .infinity, minHeight: 52)
-          .foregroundStyle(.black)
-          .background(Capsule().fill(Ink.text))
+          .foregroundStyle(placed ? Ink.text : .black)
+          .background(Capsule().fill(placed ? Ink.raised : Ink.text))
       }
       .buttonStyle(Press())
       .disabled(room.scanTargets().isEmpty)
@@ -2486,10 +2548,22 @@ private struct MapScreen: View {
     }
   }
 
+  /// Folded away: most people set it once, if ever.
   private func syncSection(_ lights: [LightItem]) -> some View {
+    DisclosureGroup {
+      syncTools(lights).padding(.top, 12)
+    } label: {
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Keep lights in sync").font(.headline).foregroundStyle(Ink.text)
+        Text("If one light changes late").font(.footnote).foregroundStyle(Ink.dim)
+      }
+    }
+    .tint(Ink.dim)
+  }
+
+  private func syncTools(_ lights: [LightItem]) -> some View {
     VStack(alignment: .leading, spacing: 16) {
       VStack(alignment: .leading, spacing: 6) {
-        Text("Keep lights in sync").font(.headline)
         Text("Flash them and watch: everything should come back at the same moment. If a light comes back late, slide it right so it's sent earlier; early, slide it left.")
           .font(.footnote)
           .foregroundStyle(Ink.dim)
