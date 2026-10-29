@@ -187,6 +187,9 @@ final class StripController: NSObject {
   /// Nearby devices that aren't saved strips, for the setup list.
   private(set) var devices: [FoundDevice] = []
   private(set) var bluetoothOn = false
+  /// Why the strips can't be reached, when it's Bluetooth itself: off, or not allowed for this app. Nil while
+  /// Bluetooth is still starting up, so the app doesn't flash a warning at launch.
+  private(set) var bluetoothProblem: String?
   /// The strip just picked in setup. It joins `strips` once it connects, so a wrong pick is never saved.
   private(set) var adding: Strip?
   var log: [String] = []
@@ -540,6 +543,12 @@ extension StripController: CBCentralManagerDelegate {
 
   func centralManagerDidUpdateState(_ central: CBCentralManager) {
     bluetoothOn = central.state == .poweredOn
+    bluetoothProblem = switch central.state {
+    case .poweredOff: "Bluetooth is off. Turn it on in Control Center to reach your strips."
+    case .unauthorized: "Dorm Remote isn't allowed to use Bluetooth. Turn it on in Settings → Dorm Remote."
+    case .unsupported: "This phone doesn't support Bluetooth LE."
+    default: nil
+    }
     guard bluetoothOn else {
       note("bluetooth state \(central.state.rawValue)")
       // Turning Bluetooth off drops every link without a disconnect callback.

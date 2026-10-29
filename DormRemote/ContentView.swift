@@ -124,6 +124,8 @@ struct ContentView: View {
   @State private var sceneName = ""
   @State private var photo: PhotosPickerItem?
   @State private var photoError = false
+  /// A scene waiting for "Delete" to be confirmed.
+  @State private var deletingScene: String?
   /// The scene group on show; nil opens on the first one (Favorites if you have some).
   @SceneStorage("sceneGroup") private var sceneGroup: String?
   @Namespace private var tabs
@@ -187,6 +189,15 @@ struct ContentView: View {
           .font(.subheadline)
           .foregroundStyle(Ink.dim)
           .contentTransition(.numericText())
+        // Nielsen's first heuristic: say what's wrong where you'd look, not as "offline" on every strip.
+        if let problem = room.strip.bluetoothProblem, !room.strip.strips.isEmpty {
+          Label(problem, systemImage: "exclamationmark.triangle.fill")
+            .font(.subheadline)
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .card(tint: Ink.bad)
+            .transition(.opacity)
+        }
         roomTabs
         nowPlaying
         HStack {
@@ -287,6 +298,14 @@ struct ContentView: View {
       }
     } message: {
       Text("You can add it back from Add.")
+    }
+    .confirmationDialog("Delete \(deletingScene ?? "scene")?", isPresented: Binding(get: { deletingScene != nil }, set: { if !$0 { deletingScene = nil } }), titleVisibility: .visible) {
+      Button("Delete scene", role: .destructive) {
+        if let id = deletingScene { room.deleteScene(id) }
+        deletingScene = nil
+      }
+    } message: {
+      Text("This can't be undone.")
     }
     .confirmationDialog("Delete \(deletingRoom ?? "room")?", isPresented: Binding(get: { deletingRoom != nil }, set: { if !$0 { deletingRoom = nil } }), titleVisibility: .visible) {
       Button("Delete room", role: .destructive) {
@@ -551,7 +570,7 @@ struct ContentView: View {
         room.toggleFavorite(mood.id)
       }
       if mood.group == .mine {
-        Button("Delete scene", systemImage: "trash", role: .destructive) { room.deleteScene(mood.id) }
+        Button("Delete scene", systemImage: "trash", role: .destructive) { deletingScene = mood.id }
       }
     }
   }
