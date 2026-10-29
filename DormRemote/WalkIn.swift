@@ -12,7 +12,14 @@ import UIKit
 /// and arrival waits for at least that signal. If iOS won't read the signal in the background, the lights come on
 /// at reconnect instead of leaving you in the dark.
 ///
-/// Two gaps in that, and their fixes:
+/// The room beacon: the IR bridge also advertises as an iBeacon (firmware/src/main.cpp). iOS watches for it even
+/// when the app was swiped away and relaunches the app as you come into range, then again about 30 s after you
+/// leave it. That's the one signal that knows your room rather than your building, so it's the main sensor when the
+/// bridge is plugged in: in range → coming in, out of range → leaving. While you walk in, the app ranges the beacon
+/// once a second (iOS allows that in the background while location updates run, which they do only for those few
+/// minutes) and waits for the signal you recorded at your door.
+///
+/// Two gaps in the strip-only version, and their fixes:
 /// - Swiping the app away stops iOS from relaunching it for Bluetooth (Apple QA1962). Region monitoring is the one
 ///   wake-up that survives a swipe (Apple DTS on the developer forums), so the optional location backup watches a
 ///   circle around home: crossing it relaunches the app, which re-arms the Bluetooth connects before you're in range.
@@ -33,6 +40,10 @@ final class WalkIn: NSObject {
   /// The location backup's circle. iOS wants at least about 100 m to be reliable; 150 m covers a dorm building.
   static let homeRadius: CLLocationDistance = 150
   private static let regionID = "walkInHome"
+  /// The bridge's iBeacon (same UUID as the firmware).
+  static let beaconUUID = UUID(uuidString: "D0A1E7B2-6F2C-4C8B-9E31-5B7A0C1D2E3F")!
+  private static let beaconID = "walkInRoom"
+  private static var beacon: CLBeaconIdentityConstraint { CLBeaconIdentityConstraint(uuid: beaconUUID) }
 
   var enabled = UserDefaults.standard.bool(forKey: "walkIn") {
     didSet {
@@ -52,13 +63,21 @@ final class WalkIn: NSObject {
   var offWhenLeaving = UserDefaults.standard.bool(forKey: "walkInOffWhenLeaving") {
     didSet { UserDefaults.standard.set(offWhenLeaving, forKey: "walkInOffWhenLeaving") }
   }
-  /// The location backup.
+  /// Location: the room beacon and the circle around home. Both need "Always" so iOS can wake the app.
   var useLocation = UserDefaults.standard.bool(forKey: "walkInLocation") {
     didSet {
       UserDefaults.standard.set(useLocation, forKey: "walkInLocation")
       if useLocation, home == nil { setHomeHere() } else { updateGeofence() }
     }
   }
+  /// Beacon signal (dBm) at your door. Nil: light up as soon as the beacon is seen.
+  private(set) var beaconSpot = UserDefaults.standard.object(forKey: "walkInBeaconSpot") as? Int {
+    didSet { UserDefaults.standard.set(beaconSpot, forKey: "walkInBeaconSpot") }
+  }
+  /// Whether iOS last placed you inside the beacon's range; nil until it has said either way.
+  private(set) var nearBeacon: Bool?
+  /// The latest beacon reading while ranging, for the screen.
+  private(set) var beaconRSSI: Int?
   /// Signal strength (dBm) at your door. Nil: light up as soon as a strip is back.
   private(set) var spot = UserDefaults.standard.object(forKey: "walkInSpot") as? Int {
     didSet { UserDefaults.standard.set(spot, forKey: "walkInSpot") }
@@ -94,6 +113,10 @@ final class WalkIn: NSObject {
     didSet { UserDefaults.standard.set(awaySince, forKey: "walkInAway") }
   }
   private var arrivedAt: Date?
+  /// While walking in with a beacon spot set: the signal to reach and when to give up.
+  private var rangeTarget: (spot: Int, until: Date)?
+  /// Readings collected by Set my spot.
+  private var spotReadings: [Int]?
   /// Lights already welcomed this time, so a late one is lit once and a light you switch off stays off.
   private var welcomed: Set<String> = []
   private var background: UIBackgroundTaskIdentifier = .invalid
@@ -123,6 +146,8 @@ final class WalkIn: NSObject {
 
   func stripDropped() {
     guard connected.isEmpty, awaySince == nil else { return }
+    // The beacon still hears you: a strip blipped, you didn't leave. Its exit comes about 30 s after you do.
+    if useLocation, nearBeacon == true { return }
     left("Your strips went out of Bluetooth range.")
   }
 
@@ -141,6 +166,21 @@ final class WalkIn: NSObject {
   func stripConnected(_ id: UUID) {
     lightReady()
     guard let since = awaySince else { return }
+    comeBack(since: since, via: "Back in range of your strips", strip: id)
+  }
+
+  /// The room beacon came into range: iOS relaunches the app for this even after a swipe-away.
+  private func beaconEntered() {
+    nearBeacon = true
+    guard enabled else { return }
+    // After a swipe-away nothing else re-arms the strips' connects.
+    room?.strip.reconnectNow()
+    guard let since = awaySince else { return }
+    beginBackground()
+    comeBack(since: since, via: "Your room's beacon is in range", strip: nil)
+  }
+
+  private func comeBack(since: Date, via: String, strip id: UUID?) {
     awaySince = nil
     guard enabled else { return }
     let minutes = Int(Date().timeIntervalSince(since) / 60)
@@ -154,11 +194,16 @@ final class WalkIn: NSObject {
       return
     }
     beginBackground()
-    if let spot {
-      note("Back in range after \(minutes) min. Waiting for you to reach your spot.")
-      waitForSpot(id, spot, until: Date().addingTimeInterval(Self.spotWait))
+    let deadline = Date().addingTimeInterval(Self.spotWait)
+    // The beacon sits in your room, so its signal places you better than a strip's.
+    if let beaconSpot, useLocation {
+      note("\(via) after \(minutes) min. Waiting for you to reach your door.")
+      startRanging(until: deadline, spot: beaconSpot)
+    } else if let id, let spot {
+      note("\(via) after \(minutes) min. Waiting for you to reach your spot.")
+      waitForSpot(id, spot, until: deadline)
     } else {
-      note("Back in range after \(minutes) min.")
+      note("\(via) after \(minutes) min.")
       arrive(id)
     }
   }
@@ -218,6 +263,42 @@ final class WalkIn: NSObject {
     note(late.count == 1 ? "One more light caught up." : "\(late.count) more lights caught up.")
   }
 
+  // MARK: Ranging the beacon
+
+  private func startRanging(until deadline: Date? = nil, spot: Int? = nil) {
+    if let deadline, let spot { rangeTarget = (spot, deadline) }
+    // Ranging only runs in the background while location updates do; they stop as soon as you're in.
+    if rangeTarget != nil {
+      location.allowsBackgroundLocationUpdates = true
+      location.showsBackgroundLocationIndicator = false
+      location.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+      location.startUpdatingLocation()
+    }
+    location.startRangingBeacons(satisfying: Self.beacon)
+  }
+
+  private func stopRanging() {
+    location.stopRangingBeacons(satisfying: Self.beacon)
+    location.stopUpdatingLocation()
+    location.allowsBackgroundLocationUpdates = false
+    rangeTarget = nil
+  }
+
+  private func ranged(_ rssi: Int?) {
+    beaconRSSI = rssi
+    if rssi != nil { nearBeacon = true }
+    if spotReadings != nil, let rssi { spotReadings?.append(rssi) }
+    guard let target = rangeTarget else { return }
+    if let rssi, rssi >= target.spot {
+      stopRanging()
+      arrive(nil)
+    } else if Date() > target.until {
+      stopRanging()
+      note("You didn't reach your door within 3 minutes, so no welcome. Walking past?")
+      endBackground()
+    }
+  }
+
   /// "Try it now": runs the welcome as if you'd just walked in.
   func tryNow() {
     note("Test run.")
@@ -228,6 +309,7 @@ final class WalkIn: NSObject {
 
   /// Stand at your door and call this: averages a few readings from the nearest connected strip.
   func setSpot() {
+    measureBeacon()
     guard let room, let strip = connected.first(where: { s in
       room.item(Room.stripItemID(s.id)).map { room.roomOf($0) == room.currentRoom } ?? false
     }) ?? connected.first else {
@@ -260,7 +342,27 @@ final class WalkIn: NSObject {
     next(6)
   }
 
-  func clearSpot() { spot = nil }
+  func clearSpot() {
+    spot = nil
+    beaconSpot = nil
+  }
+
+  /// Three seconds of beacon readings where you stand. Skipped quietly when location is off or no bridge is near.
+  private func measureBeacon() {
+    guard useLocation, location.authorizationStatus == .authorizedAlways || location.authorizationStatus == .authorizedWhenInUse else { return }
+    spotReadings = []
+    startRanging()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+      MainActor.assumeIsolated {
+        let readings = self.spotReadings ?? []
+        self.spotReadings = nil
+        if self.rangeTarget == nil { self.location.stopRangingBeacons(satisfying: Self.beacon) }
+        guard !readings.isEmpty else { return }
+        self.beaconSpot = readings.reduce(0, +) / readings.count - 4
+        self.note("Beacon spot set at \(self.beaconSpot!) dBm.")
+      }
+    }
+  }
 
   // MARK: Location backup
 
@@ -284,7 +386,17 @@ final class WalkIn: NSObject {
   }
 
   private func updateGeofence() {
-    for region in location.monitoredRegions where region.identifier == Self.regionID { location.stopMonitoring(for: region) }
+    for region in location.monitoredRegions where region.identifier == Self.regionID || region.identifier == Self.beaconID {
+      location.stopMonitoring(for: region)
+    }
+    if enabled, useLocation, CLLocationManager.isMonitoringAvailable(for: CLBeaconRegion.self) {
+      let beacon = CLBeaconRegion(uuid: Self.beaconUUID, identifier: Self.beaconID)
+      beacon.notifyOnEntry = true
+      beacon.notifyOnExit = true
+      // Waking the screen asks iOS where you are, so pulling out your phone at the door counts too.
+      beacon.notifyEntryStateOnDisplay = true
+      location.startMonitoring(for: beacon)
+    }
     guard enabled, useLocation, let home, CLLocationManager.isMonitoringAvailable(for: CLCircularRegion.self) else { return }
     let region = CLCircularRegion(center: home, radius: Self.homeRadius, identifier: Self.regionID)
     region.notifyOnEntry = true
@@ -369,11 +481,38 @@ extension WalkIn: CLLocationManagerDelegate {
 
   nonisolated func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
     let id = region.identifier
-    MainActor.assumeIsolated { if id == Self.regionID { nearHome() } }
+    MainActor.assumeIsolated {
+      if id == Self.regionID { nearHome() }
+      if id == Self.beaconID { beaconEntered() }
+    }
   }
 
   nonisolated func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
     let id = region.identifier
-    MainActor.assumeIsolated { if id == Self.regionID { leftHome() } }
+    MainActor.assumeIsolated {
+      if id == Self.regionID { leftHome() }
+      if id == Self.beaconID {
+        nearBeacon = false
+        if awaySince == nil { left("You left your room's beacon range.") }
+      }
+    }
+  }
+
+  /// Also called when you wake the screen (notifyEntryStateOnDisplay): inside after being away is coming in.
+  nonisolated func locationManager(_ manager: CLLocationManager, didDetermineState state: CLRegionState, for region: CLRegion) {
+    guard region.identifier == Self.beaconID else { return }
+    MainActor.assumeIsolated {
+      switch state {
+      case .inside: if nearBeacon != true || awaySince != nil { beaconEntered() }
+      case .outside: nearBeacon = false
+      default: break
+      }
+    }
+  }
+
+  nonisolated func locationManager(_ manager: CLLocationManager, didRange beacons: [CLBeacon], satisfying constraint: CLBeaconIdentityConstraint) {
+    // 0 means iOS heard it but couldn't measure this second.
+    let rssi = beacons.map(\.rssi).filter { $0 != 0 }.max()
+    MainActor.assumeIsolated { ranged(rssi) }
   }
 }

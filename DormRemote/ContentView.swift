@@ -764,7 +764,7 @@ extension ContentView {
           ForEach(room.items) { item in
             Button { open(item) } label: {
               HStack(spacing: 12) {
-                Orb(item: item, size: 36)
+                Orb(item: item, color: room.live[item.id], size: 36)
                 VStack(alignment: .leading, spacing: 2) {
                   Text(item.name).foregroundStyle(Ink.text)
                   if case .offline(let why) = item.status {
@@ -1103,6 +1103,8 @@ private struct LightSheet: View {
 
   var body: some View {
     if let item = isRoom ? room.look(id) : room.item(id) {
+      // What the light shows right now, so the switch and slider move with a running effect like the Room tab does.
+      let glow = (isRoom ? room.ambient : room.shown(item).color) ?? item.glow.color
       ScrollView {
         VStack(alignment: .leading, spacing: 28) {
           HStack(spacing: 16) {
@@ -1113,7 +1115,7 @@ private struct LightSheet: View {
             Spacer()
             Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(id, $0) }))
               .labelsHidden()
-              .tint(item.glow.color)
+              .tint(glow)
           }
 
           modePicker(item)
@@ -1124,7 +1126,7 @@ private struct LightSheet: View {
               .foregroundStyle(Ink.dim)
             PillSlider(
               value: Binding(get: { Double(item.brightness) / 100 }, set: { room.setBrightness(id, Int(($0 * 100).rounded())) }),
-              fill: AnyShapeStyle(item.glow.color),
+              fill: AnyShapeStyle(glow),
               label: "Brightness"
             )
             .frame(height: 48)
@@ -1923,9 +1925,10 @@ private struct WalkInSection: View {
     let walkIn = room.walkIn
     VStack(alignment: .leading, spacing: 28) {
         VStack(alignment: .leading, spacing: 8) {
-          Text("Your room lights up when you get back. Your strips are the sensor: once you've been gone a while and your phone comes back into a strip's Bluetooth range, the lights come on.")
+          Text("Your room lights up when you get back and knows when you've left. Your IR bridge's beacon tells it you're at your room; your strips and a circle around your building back it up.")
             .foregroundStyle(Ink.dim)
         }
+        sensors(walkIn)
 
         Toggle(isOn: Binding(get: { walkIn.enabled }, set: { walkIn.enabled = $0 })) {
           Text("Light up when I get home").font(.body.weight(.semibold))
@@ -2002,12 +2005,45 @@ private struct WalkInSection: View {
     .sensoryFeedback(.success, trigger: walkIn.spot)
   }
 
+  /// What each sensor sees right now, so you can tell why it did or didn't light up.
+  private func sensors(_ walkIn: WalkIn) -> some View {
+    let strips = room.strip.strips
+    let connected = strips.filter { $0.state == .connected }.count
+    return VStack(alignment: .leading, spacing: 12) {
+      sensor("light.strip.2", "Strips",
+             strips.isEmpty ? "None added" : connected == 0 ? "Out of range" : "\(connected) of \(strips.count) in range",
+             good: connected > 0)
+      sensor("sensor.tag.radiowaves.forward", "Room beacon",
+             !walkIn.useLocation ? "Turn on Use location"
+               : walkIn.nearBeacon == true ? (walkIn.beaconRSSI.map { "In range (\($0) dBm)" } ?? "In range")
+               : walkIn.nearBeacon == false ? "Out of range" : "Not seen yet. Plug in the IR bridge (firmware from Oct 29 or later)",
+             good: walkIn.nearBeacon == true)
+      sensor("mappin.circle", "Area around home",
+             !walkIn.useLocation ? "Off" : walkIn.home == nil ? "Not set" : "Set (150 m)",
+             good: walkIn.useLocation && walkIn.home != nil)
+    }
+    .padding(16)
+    .card()
+  }
+
+  private func sensor(_ icon: String, _ name: String, _ state: String, good: Bool) -> some View {
+    HStack(spacing: 12) {
+      Image(systemName: icon).frame(width: 28).foregroundStyle(good ? Ink.text : Ink.dim)
+      Text(name).font(.subheadline.weight(.semibold))
+      Spacer()
+      Text(state).font(.footnote).foregroundStyle(Ink.dim).multilineTextAlignment(.trailing)
+    }
+    .accessibilityElement(children: .combine)
+  }
+
   private func spotSection(_ walkIn: WalkIn) -> some View {
     VStack(alignment: .leading, spacing: 12) {
       Text("Your spot").font(.headline)
       Text(walkIn.spot == nil
-           ? "Not set: the lights come on as soon as a strip is back in range, which is about your hallway. Stand right outside your door and tap Set my spot to make them wait until you're there."
-           : "Set: on the way back, the lights wait until you're about as close as where you stood.")
+           ? "Not set: the lights come on as soon as you're back in range, which is about your hallway. Stand right outside your door and tap Set my spot to make them wait until you're there."
+           : walkIn.beaconSpot != nil
+             ? "Set with the beacon (\(walkIn.beaconSpot!) dBm): the lights wait until you're about as close to your room as where you stood."
+             : "Set with your strips: the lights wait until you're about as close as where you stood. Turn on Use location first to set it with the beacon, which is more exact.")
         .font(.subheadline)
         .foregroundStyle(Ink.dim)
         .fixedSize(horizontal: false, vertical: true)
@@ -2039,8 +2075,8 @@ private struct WalkInSection: View {
     VStack(alignment: .leading, spacing: 12) {
       Toggle(isOn: Binding(get: { walkIn.useLocation }, set: { walkIn.useLocation = $0 })) {
         VStack(alignment: .leading, spacing: 2) {
-          Text("Location backup").font(.body.weight(.semibold))
-          Text("iOS wakes the app when you get near home, even if you swiped it away, so the strips are ready to catch you at the door. Your strips still decide when you're there.")
+          Text("Use location (recommended)").font(.body.weight(.semibold))
+          Text("Lets iOS wake Dorm Remote as you come in, even if you swiped it away: from your IR bridge's beacon right at your room, and from a circle around your building. Needs location set to Always.")
             .font(.footnote)
             .foregroundStyle(Ink.dim)
             .fixedSize(horizontal: false, vertical: true)
@@ -2068,7 +2104,7 @@ private struct WalkInSection: View {
           .buttonStyle(Press())
           .disabled(walkIn.locating)
         }
-        Text("Do this in your room. It watches a 150 m circle around it.")
+        Text("Do this in your room. It watches a 150 m circle around it, which catches you on the way in before the beacon does.")
           .font(.footnote)
           .foregroundStyle(Ink.dim)
         if let error = walkIn.locationError {
@@ -2266,7 +2302,7 @@ private struct ScanSheet: View {
                   .frame(width: 28, height: 28)
                   .foregroundStyle(n == nil ? Ink.dim : .black)
                   .background(Circle().fill(n == nil ? Ink.raised : Ink.text))
-                Orb(item: light, size: 32)
+                Orb(item: light, color: room.live[light.id], size: 32)
                 Text(light.name).font(.body.weight(.semibold))
                 Spacer()
                 if room.placements[light.id]?.found == true {

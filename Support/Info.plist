@@ -26,7 +26,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>"Find my lights" watches your lights blink to learn where each one is. Nothing is recorded.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Walk in's location backup: iOS wakes Dorm Remote when you get near home, so your lights can welcome you even if you swiped the app away. Only a circle around home is watched.</string>
+	<string>Walk in: iOS wakes Dorm Remote when you come into your room (from your IR bridge's beacon) or near your building, so the lights welcome you even if you swiped the app away, and knows when you leave.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Walk in saves where home is, so it can tell when you're back.</string>
 	<key>NSMicrophoneUsageDescription</key>
@@ -35,6 +35,7 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
+		<string>location</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

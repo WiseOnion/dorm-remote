@@ -1,6 +1,7 @@
 import CoreBluetooth
 import Foundation
 import Observation
+import UIKit
 
 /// Daybetter RGB strips over Bluetooth LE, copied from grimsteel/daybetter-led-strip, which was written for this
 /// exact controller (service E031, write A031, notify F031).
@@ -346,7 +347,14 @@ final class StripController: NSObject {
     guard let p = strip.peripheral else { return }
     central.cancelPeripheralConnection(p)
     guard adding !== strip else { return }
-    retry(strip, p, after: 15)
+    // Re-arm at once, not on a timer: iOS freezes timers while the app is in the background, and this is exactly
+    // what happens when you walk back in and the strip half-connects at the edge of range. A pending connect costs
+    // nothing and never times out (Apple's connect(_:options:) docs), so iOS keeps waiting for the strip by itself.
+    if Self.inBackground {
+      central.connect(p)
+    } else {
+      retry(strip, p, after: 15)
+    }
   }
 
   private func retry(_ strip: Strip, _ p: CBPeripheral, after seconds: Double) {
@@ -464,6 +472,28 @@ final class StripController: NSObject {
     // Ask for the current state so the app matches whatever the remote or DayBetter app set.
     send(strip.id, Daybetter.frame(Daybetter.status, [0x00]))
     onConnect?(strip.id)
+    letSleep()
+  }
+
+  @ObservationIgnored private var awake: UIBackgroundTaskIdentifier = .invalid
+
+  // The central's delegate runs on the main queue, so these are on the main actor.
+  private static var inBackground: Bool { MainActor.assumeIsolated { UIApplication.shared.applicationState == .background } }
+
+  private func holdAwake() {
+    guard awake == .invalid else { return }
+    awake = MainActor.assumeIsolated {
+      UIApplication.shared.beginBackgroundTask(withName: "Strip handshake") { [weak self] in self?.letSleep() }
+    }
+    // Long enough for any handshake, and gives up rather than holding the app.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in self?.letSleep() }
+  }
+
+  private func letSleep() {
+    guard awake != .invalid else { return }
+    let task = awake
+    awake = .invalid
+    MainActor.assumeIsolated { UIApplication.shared.endBackgroundTask(task) }
   }
 
   /// Called on the main queue when a saved strip is ready, and when one drops out of range. Walk in uses them.
@@ -554,6 +584,8 @@ extension StripController: CBCentralManagerDelegate {
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
     let strip = lookup(peripheral.identifier)
     strip?.state = .connecting
+    // iOS wakes the app for this event only briefly; the handshake needs a few round trips.
+    holdAwake()
     // A known strip only needs its own service looked up, which is faster than listing them all.
     let known = strip?.service.map { [$0] }
     note(known == nil ? "connected, discovering services" : "connected, looking up \(known![0].uuidString)")
@@ -570,7 +602,7 @@ extension StripController: CBCentralManagerDelegate {
       fail(strip, error?.localizedDescription ?? "Couldn't connect")
     } else {
       strip.state = .idle
-      retry(strip, peripheral, after: 3)
+      if Self.inBackground { central.connect(peripheral) } else { retry(strip, peripheral, after: 3) }
     }
   }
 
