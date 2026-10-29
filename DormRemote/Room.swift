@@ -412,6 +412,14 @@ final class Room {
       MainActor.assumeIsolated { self?.apply(status, to: id) }
     }
     walkIn.room = self
+    if Self.demo {
+      placements = [
+        "demo-strip": Placement(x: -1.2, y: -1.4, latency: 0.05, found: true),
+        "demo-tv": Placement(x: 1.4, y: -1.0, latency: 0.05, found: true),
+        "demo-lamp": Placement(x: 1.1, y: 1.2, latency: 0.9, found: true),
+      ]
+      you = CGPoint(x: -0.3, y: 0.6)
+    }
     strip.onConnect = { [weak self] id in
       MainActor.assumeIsolated { self?.walkIn.stripConnected(id) }
     }
@@ -476,7 +484,20 @@ final class Room {
 
   // MARK: Lights
 
+  // MARK: Screenshot demo
+
+  /// Launched with -demo, which only the screenshot job does: fixed sample lights, because the simulator has no
+  /// Bluetooth or Hubspace. Nothing is sent anywhere and nothing is saved.
+  static let demo = ProcessInfo.processInfo.arguments.contains("-demo")
+  private static let demoItems: [LightItem] = [
+    LightItem(id: "demo-strip", name: "LED strip", kind: .strip, status: .ready, on: true, brightness: 72, color: RGB(r: 150, g: 70, b: 255)),
+    LightItem(id: "demo-tv", name: "TV strip", kind: .strip, status: .ready, on: true, brightness: 60, color: RGB(r: 255, g: 60, b: 170)),
+    LightItem(id: "demo-lamp", name: "Desk lamp", kind: .bulb, status: .ready, on: true, brightness: 80, kelvin: 2700),
+    LightItem(id: "demo-projector", name: "Projector", kind: .remote, status: .ready),
+  ]
+
   var items: [LightItem] {
+    if Self.demo { return Self.demoItems }
     let strips: [LightItem] = strip.strips.enumerated().map { i, s in
       let id = Self.stripItemID(s.id)
       let look = stripLooks[s.id] ?? SavedLook()

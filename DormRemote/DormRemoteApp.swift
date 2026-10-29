@@ -20,7 +20,6 @@ struct DormRemoteApp: App {
   var body: some Scene {
     WindowGroup {
       ContentView(room: room)
-        .preferredColorScheme(.dark)
     }
   }
 }

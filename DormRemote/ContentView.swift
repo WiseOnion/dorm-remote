@@ -3,22 +3,30 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-// Design, "night room": a near-black canvas, gray cards with a hairline edge, and white for anything you press.
-// The lights are the only color: their dots, sliders and a soft glow behind every tab.
-// Layout follows the Hubspace light screen (mode circles, brightness bar, presets, wheel)
-// with DayBetter's patterns and music on top.
-// Each gray has an Increase Contrast variant, as Apple's HIG (Color) asks of custom colors: edges, fills and secondary
-// text get clearly brighter when that setting is on.
+// Design system. One quiet surface ladder (canvas, surface, raised), one line, three text levels, and no accent of its
+// own: the room's lights supply the only color. Every gray has a light and a dark value and an Increase Contrast
+// variant (Apple HIG: Color, Dark Mode). Content sits on solid surfaces; glass is left to the system's bars.
 private enum Ink {
-  static let bg = Color(hex: 0x07070B)
-  static let card = Color(hex: 0x121218)
-  static let raised = Color(hex: 0x1F1F27, contrast: 0x2E2E3A)
-  /// Card edge: light enough to separate a card from the canvas, quiet enough to disappear.
-  static let line = Color(UIColor { $0.accessibilityContrast == .high ? UIColor(white: 1, alpha: 0.24) : UIColor(white: 1, alpha: 0.07) })
-  static let text = Color(hex: 0xF5F5F7)
-  /// Secondary text: 7.3:1 on cards, 6.4:1 on raised fills (WCAG AA needs 4.5).
-  static let dim = Color(hex: 0xA1A1AA, contrast: 0xD4D4D8)
-  static let bad = Color(hex: 0xFF6B5E, contrast: 0xFF8A80)
+  static let bg = Color(dark: 0x09090B, light: 0xF2F2F7)
+  static let card = Color(dark: 0x111114, light: 0xFFFFFF)
+  static let raised = Color(dark: 0x18181D, light: 0xE8E8ED, darkContrast: 0x2A2A33, lightContrast: 0xD1D1D8)
+  static let line = Color(UIColor { t in
+    let a: CGFloat = t.accessibilityContrast == .high ? 0.24 : 0.09
+    return t.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: a) : UIColor(white: 0, alpha: a)
+  })
+  static let text = Color(dark: 0xF5F5F7, light: 0x111114)
+  /// Secondary text: 7.3:1 on dark surfaces, 6.3:1 on white (WCAG AA needs 4.5).
+  static let dim = Color(dark: 0xA1A1AA, light: 0x5E5E66, darkContrast: 0xD4D4D8, lightContrast: 0x3A3A40)
+  /// Text and symbols on a filled `text`-colored control.
+  static let inverse = Color(dark: 0x09090B, light: 0xFFFFFF)
+  static let bad = Color(dark: 0xFF6B5E, light: 0xD93025, darkContrast: 0xFF8A80, lightContrast: 0xB3261E)
+}
+
+/// Corner radii: three sizes, used everywhere.
+private enum Radius {
+  static let control: CGFloat = 12
+  static let card: CGFloat = 18
+  static let feature: CGFloat = 24
 }
 
 /// One set of timings for the whole app, so every screen moves the same way.
@@ -34,7 +42,7 @@ private enum Motion {
 }
 
 /// The room's light behind every tab: the average of what's on, washed faintly from the top. Shared, so switching
-/// tabs keeps the same room around you.
+/// tabs keeps the same room around you. Nothing on, no wash.
 private struct RoomGlow: View {
   var room: Room
 
@@ -42,7 +50,7 @@ private struct RoomGlow: View {
     ZStack {
       Ink.bg
       if let ambient = room.ambient {
-        RadialGradient(colors: [ambient.opacity(0.22), ambient.opacity(0.05), .clear], center: .top, startRadius: 0, endRadius: 560)
+        RadialGradient(colors: [ambient.opacity(0.16), ambient.opacity(0.04), .clear], center: .top, startRadius: 0, endRadius: 520)
       }
     }
     .ignoresSafeArea()
@@ -51,31 +59,30 @@ private struct RoomGlow: View {
 }
 
 extension View {
-  /// Every sheet looks the same: dark card, rounded, with a grabber.
+  /// Every sheet looks the same: the surface color with a grabber; the system draws the corners.
   fileprivate func panel() -> some View {
     presentationDragIndicator(.visible)
       .presentationBackground(Ink.card)
-      .presentationCornerRadius(32)
-      .preferredColorScheme(.dark)
   }
 }
 
-/// A card: the base surface for rows and panels. `tint` washes it with a light's color while it's on.
+/// A surface for a group of things. No border: the surface step from the canvas separates it. `tint` adds a hairline
+/// in that color, for the rare panel that needs to call attention (a warning).
 private struct Card: ViewModifier {
   var tint: Color?
-  var radius: CGFloat = 24
+  var radius: CGFloat = Radius.card
 
   func body(content: Content) -> some View {
     let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
     content.background(
       shape.fill(Ink.card)
-        .overlay(shape.strokeBorder(tint.map { $0.opacity(0.28) } ?? Ink.line, lineWidth: 1))
+        .overlay { if let tint { shape.strokeBorder(tint.opacity(0.5), lineWidth: 1) } }
     )
   }
 }
 
 extension View {
-  fileprivate func card(tint: Color? = nil, radius: CGFloat = 24) -> some View { modifier(Card(tint: tint, radius: radius)) }
+  fileprivate func card(tint: Color? = nil, radius: CGFloat = Radius.card) -> some View { modifier(Card(tint: tint, radius: radius)) }
 }
 
 /// Pressed state for every custom button: a slight shrink and dim on a spring, so taps feel answered
@@ -128,34 +135,40 @@ struct ContentView: View {
   @State private var deletingScene: String?
   /// The scene group on show; nil opens on the first one (Favorites if you have some).
   @SceneStorage("sceneGroup") private var sceneGroup: String?
-  @Namespace private var tabs
+  /// Which tab is open. Starts from the "tab" default, which screenshots set with -tab.
+  @State private var tab = UserDefaults.standard.string(forKey: "tab") ?? "room"
+  @State private var photoPicking = false
 
   private enum RoomEdit: Equatable { case add, rename(String) }
 
-  /// Four tabs, after Hue's (Home, Automations, …, Settings): what you use every day first, then the room's layout,
-  /// what runs by itself, and setup you do once. Each tab has a native large title that shrinks as you scroll
-  /// (Apple's HIG suggests it for the top level of a tabbed app) and keeps its actions in the toolbar.
+  /// Four tabs, after Hue's (Home, Automations, …, Settings): your room first, then its layout, what runs by itself,
+  /// and setup you do once. The tab bar and navigation bars are the system's, so they take on iOS's own glass.
   var body: some View {
-    presenting(TabView {
+    presenting(TabView(selection: $tab) {
       NavigationStack {
         roomTab
           .navigationTitle(room.currentRoom)
+          .navigationBarTitleDisplayMode(.inline)
           .toolbar { roomToolbar }
       }
-      .tabItem { Label("Room", systemImage: "lightbulb.2.fill") }
+      .tabItem { Label("Room", systemImage: "house.fill") }
+      .tag("room")
       MapScreen(room: room)
         .tabItem { Label("Map", systemImage: "map.fill") }
+        .tag("map")
       AutomationsTab(room: room)
-        .tabItem { Label("Automations", systemImage: "clock.arrow.2.circlepath") }
+        .tabItem { Label("Automations", systemImage: "clock.fill") }
+        .tag("automations")
       settingsTab
         .tabItem { Label("Settings", systemImage: "gearshape.fill") }
+        .tag("settings")
     }
-    .tint(Ink.text)
-    .preferredColorScheme(.dark))
+    .tint(Ink.text))
   }
 
   @ToolbarContentBuilder
   private var roomToolbar: some ToolbarContent {
+    ToolbarItem(placement: .principal) { roomMenu }
     ToolbarItemGroup(placement: .topBarTrailing) {
       Menu {
         Section("Fade out and turn off in") {
@@ -164,87 +177,106 @@ struct ContentView: View {
           }
         }
       } label: {
-        Image(systemName: "moon.zzz").font(.body.weight(.semibold))
+        Image(systemName: "moon")
       }
       .disabled(!room.anyOn)
       .accessibilityLabel("Sleep timer")
       Button { sheet = .light(Room.all) } label: {
-        Image(systemName: "slider.horizontal.3").font(.body.weight(.semibold))
+        Image(systemName: "slider.horizontal.3")
       }
       .disabled(room.roomReady.filter { $0.kind != .remote }.isEmpty)
       .accessibilityLabel("Room controls")
-      PowerButton(on: room.anyOn) { room.setPower(Room.all, !room.anyOn) }
-        .disabled(room.roomReady.isEmpty)
-        .contextMenu {
-          Button("Turn off every room", systemImage: "power") { room.setPower(Room.everything, false) }
-        }
     }
   }
 
+  /// The room switcher, like Apple Home's title menu: the room's name, and its rooms underneath.
+  private var roomMenu: some View {
+    Menu {
+      Picker("Room", selection: Binding(get: { room.currentRoom }, set: { name in
+        withAnimation(reduceMotion ? Motion.state : Motion.tap) { room.selectedRoom = name }
+      })) {
+        ForEach(room.rooms, id: \.self) { Text($0).tag($0) }
+      }
+      Divider()
+      Button("New room", systemImage: "plus") {
+        roomName = ""
+        roomEdit = .add
+      }
+      Button("Rename \(room.currentRoom)", systemImage: "pencil") {
+        roomName = room.currentRoom
+        roomEdit = .rename(room.currentRoom)
+      }
+      if room.rooms.count > 1 {
+        Button("Delete \(room.currentRoom)", systemImage: "trash", role: .destructive) { deletingRoom = room.currentRoom }
+      }
+    } label: {
+      HStack(spacing: 4) {
+        Text(room.currentRoom).font(.headline)
+        Image(systemName: "chevron.down").font(.caption.weight(.bold)).foregroundStyle(Ink.dim)
+      }
+      .foregroundStyle(Ink.text)
+      .frame(minHeight: 44)
+    }
+    .accessibilityLabel("Room")
+    .accessibilityValue(room.currentRoom)
+  }
+
+  /// The Room tab reads top to bottom as: the room (its state and its power), its lights, then the looks you can give
+  /// it (scenes) and the ones that keep moving (effects). Hardware names stay out of it; they're in Settings.
   private var roomTab: some View {
-    // A List, so rows get the standard iOS swipe-left-to-delete.
     List {
-      Group {
-        Text(summary)
-          .font(.subheadline)
-          .foregroundStyle(Ink.dim)
-          .contentTransition(.numericText())
-        // Nielsen's first heuristic: say what's wrong where you'd look, not as "offline" on every strip.
+      Section {
+        hero
+        // Nielsen's first heuristic: say what's wrong where you'd look, not as "not reachable" on every light.
         if let problem = room.strip.bluetoothProblem, !room.strip.strips.isEmpty {
           Label(problem, systemImage: "exclamationmark.triangle.fill")
             .font(.subheadline)
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .card(tint: Ink.bad)
-            .transition(.opacity)
         }
-        roomTabs
         nowPlaying
+      }
+      .listRowBackground(Color.clear)
+      .listRowSeparator(.hidden)
+      .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+
+      Section {
+        ForEach(room.inRoom) { item in row(item) }
+        if room.inRoom.isEmpty { emptyRoom }
+      } header: {
         HStack {
           SectionTitle("Lights")
           Spacer()
           Button { sheet = .add } label: {
-            Label("Add", systemImage: "plus").font(.subheadline.weight(.semibold))
+            Image(systemName: "plus").font(.body.weight(.semibold)).frame(width: 44, height: 44)
           }
-          .buttonStyle(Press())
-          .frame(minHeight: 44)
+          .accessibilityLabel("Add a light")
         }
-        .padding(.top, 8)
-        ForEach(room.inRoom) { item in row(item) }
-        if room.inRoom.isEmpty {
-          VStack(spacing: 16) {
-            Image(systemName: "light.strip.2")
-              .font(.system(size: 28, weight: .medium))
-              .foregroundStyle(Ink.dim)
-            VStack(spacing: 4) {
-              Text("Nothing in \(room.currentRoom) yet").font(.headline)
-              Text("Add a light, or move one here from its settings.")
-                .font(.subheadline)
-                .foregroundStyle(Ink.dim)
-                .multilineTextAlignment(.center)
-            }
-            Button { sheet = .add } label: {
-              Text("Add a light")
-                .font(.body.weight(.semibold))
-                .padding(.horizontal, 24)
-                .frame(minHeight: 48)
-                .foregroundStyle(.black)
-                .background(Capsule().fill(Ink.text))
-            }
-            .buttonStyle(Press())
-          }
-          .frame(maxWidth: .infinity)
-          .padding(24)
-          .card()
-        }
-        scenes.padding(.top, 16)
-        Color.clear.frame(height: 16)
+      }
+      .listRowBackground(Ink.card)
+      .listRowSeparatorTint(Ink.line)
+
+      Section {
+        scenes
+      } header: {
+        scenesHeader
       }
       .listRowBackground(Color.clear)
       .listRowSeparator(.hidden)
-      .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
+      .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+
+      Section {
+        effects
+      } header: {
+        SectionTitle("Effects")
+      }
+      .listRowBackground(Color.clear)
+      .listRowSeparator(.hidden)
+      .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 16, trailing: 0))
     }
-    .listStyle(.plain)
+    .listStyle(.insetGrouped)
+    .listSectionSpacing(24)
     .animation(Motion.state, value: room.effect)
     // Pull down to reconnect anything that dropped and re-read the bulbs.
     .refreshable { await room.reconnect() }
@@ -256,6 +288,69 @@ struct ContentView: View {
     .background(RoomGlow(room: room))
     .foregroundStyle(Ink.text)
     .tint(Ink.text)
+    .sensoryFeedback(.selection, trigger: room.currentRoom)
+    // A light coming online is a small success; one dropping is an error you can feel.
+    .sensoryFeedback(trigger: room.roomReady.count) { old, new in new > old ? .success : new < old ? .error : nil }
+  }
+
+  /// The room at a glance: its power, what it's doing, how many lights, and whether you're home.
+  private var hero: some View {
+    let power = room.inRoom.filter { $0.caps.contains(.power) }
+    let lit = room.roomReady.filter { $0.on && $0.caps.contains(.power) }
+    return VStack(spacing: 16) {
+      RoomPower(on: room.anyOn, colors: lit.map { room.shown($0).color }) { room.setPower(Room.all, !room.anyOn) }
+        .disabled(room.roomReady.isEmpty)
+        .contextMenu {
+          Button("Turn off every room", systemImage: "power") { room.setPower(Room.everything, false) }
+        }
+      VStack(spacing: 4) {
+        Text(roomState)
+          .font(.title3.weight(.semibold))
+          .contentTransition(.opacity)
+        HStack(spacing: 8) {
+          Text(power.count == 1 ? "1 light" : "\(power.count) lights")
+          if room.walkIn.enabled {
+            Text("·")
+            Label(room.walkIn.isAway ? "Away" : "You're home", systemImage: room.walkIn.isAway ? "figure.walk.departure" : "house")
+              .labelStyle(.titleAndIcon)
+          }
+        }
+        .font(.subheadline)
+        .foregroundStyle(Ink.dim)
+      }
+      .multilineTextAlignment(.center)
+      .accessibilityElement(children: .combine)
+    }
+    .frame(maxWidth: .infinity)
+    .padding(.top, 8)
+    .animation(Motion.state, value: roomState)
+  }
+
+  /// One line that says what the room is doing.
+  private var roomState: String {
+    let ready = room.roomReady.filter { $0.caps.contains(.power) }
+    if room.inRoom.isEmpty { return "No lights yet" }
+    if ready.isEmpty { return "Connecting" }
+    let on = ready.filter(\.on).count
+    if on == 0 { return "Everything is off" }
+    if let effect = room.effectPlaying(on: Room.all) { return "\(effect.name) is playing" }
+    if let mood = room.mood { return "\(mood) is on" }
+    return on == ready.count ? "All lights on" : on == 1 ? "1 light on" : "\(on) lights on"
+  }
+
+  private var emptyRoom: some View {
+    VStack(spacing: 12) {
+      Text("Nothing in \(room.currentRoom) yet").font(.headline)
+      Text("Add a light, or move one here from Settings.")
+        .font(.subheadline)
+        .foregroundStyle(Ink.dim)
+      Button("Add a light") { sheet = .add }
+        .font(.body.weight(.semibold))
+        .frame(minHeight: 44)
+    }
+    .multilineTextAlignment(.center)
+    .frame(maxWidth: .infinity)
+    .padding(.vertical, 16)
   }
 
   private func presenting(_ content: some View) -> some View {
@@ -329,93 +424,35 @@ struct ContentView: View {
     }
   }
 
-  /// Room tabs, like Apple Home. Press and hold a room to rename or delete it.
-  private var roomTabs: some View {
-    ScrollView(.horizontal) {
-      HStack(spacing: 8) {
-        ForEach(room.rooms, id: \.self) { name in
-          let selected = room.currentRoom == name
-          Button {
-            withAnimation(reduceMotion ? Motion.state : Motion.tap) { room.selectedRoom = name }
-          } label: {
-            Text(name)
-              .font(.subheadline.weight(.semibold))
-              .padding(.horizontal, 16)
-              .frame(minHeight: 44)
-              .foregroundStyle(selected ? .black : Ink.text)
-              .background {
-                // The selected pill slides between rooms instead of jumping.
-                if selected {
-                  Capsule().fill(Ink.text).matchedGeometryEffect(id: "roomTab", in: tabs)
-                } else {
-                  Capsule().fill(Ink.raised)
-                }
-              }
-          }
-          .buttonStyle(Press())
-          .accessibilityAddTraits(selected ? .isSelected : [])
-          .contextMenu {
-            Button("Rename", systemImage: "pencil") {
-              roomName = name
-              roomEdit = .rename(name)
-            }
-            if room.rooms.count > 1 {
-              Button("Delete room", systemImage: "trash", role: .destructive) { deletingRoom = name }
-            }
-          }
-        }
-        Button {
-          roomName = ""
-          roomEdit = .add
-        } label: {
-          Image(systemName: "plus")
-            .frame(width: 44, height: 44)
-            .background(Circle().fill(Ink.raised))
-        }
-        .buttonStyle(Press())
-        .accessibilityLabel("Add room")
-      }
-    }
-    .scrollIndicators(.hidden)
-    .sensoryFeedback(.selection, trigger: room.currentRoom)
-  }
-
-  /// The effect playing in this room, live: each light's current color, the speed, and Stop. Effects start in a light's
-  /// sheet, and without this the home screen didn't show one was running.
+  /// The effect playing in this room, live: each light's current color, the speed, and Stop.
   @ViewBuilder
   private var nowPlaying: some View {
     if let effect = room.effectPlaying(on: Room.all) {
       let lights = room.roomReady.filter { room.effectLights.contains($0.id) }
       VStack(alignment: .leading, spacing: 16) {
         HStack(spacing: 12) {
-          ZStack {
-            ForEach(Array(lights.prefix(4).enumerated()), id: \.element.id) { i, light in
+          HStack(spacing: -8) {
+            ForEach(lights.prefix(4)) { light in
               Circle()
                 .fill(room.shown(light).color)
-                .frame(width: 28, height: 28)
+                .frame(width: 24, height: 24)
                 .overlay(Circle().strokeBorder(Ink.card, lineWidth: 2))
-                .offset(x: CGFloat(i) * 14)
                 .animation(Motion.frame, value: room.shown(light))
             }
           }
-          .frame(width: 28 + CGFloat(max(0, min(4, lights.count) - 1)) * 14, height: 28, alignment: .leading)
+          .accessibilityHidden(true)
           VStack(alignment: .leading, spacing: 2) {
-            Text("NOW PLAYING").font(.caption2.weight(.heavy)).tracking(2).foregroundStyle(Ink.dim)
+            Text("Now playing").font(.footnote).foregroundStyle(Ink.dim)
             Text(effect.name).font(.body.weight(.semibold)).lineLimit(1)
           }
           Spacer()
-          Button { sheet = .light(Room.all) } label: {
-            Image(systemName: "slider.horizontal.3")
-              .frame(width: 44, height: 44)
-              .background(Circle().fill(Ink.raised))
-          }
-          .buttonStyle(Press())
-          .accessibilityLabel("Change effect")
           Button { room.endEffect() } label: {
             Image(systemName: "stop.fill")
-              .frame(width: 44, height: 44)
-              .foregroundStyle(.black)
+              .font(.subheadline)
+              .frame(width: 36, height: 36)
+              .foregroundStyle(Ink.inverse)
               .background(Circle().fill(Ink.text))
+              .frame(width: 44, height: 44)
           }
           .buttonStyle(Press())
           .accessibilityLabel("Stop \(effect.name)")
@@ -424,9 +461,9 @@ struct ContentView: View {
           HStack(spacing: 12) {
             Image(systemName: "tortoise").foregroundStyle(Ink.dim)
             PillSlider(value: Binding(get: { Double(room.speed - 1) / 99 }, set: { room.setSpeed(1 + Int(($0 * 99).rounded())) }),
-                       fill: AnyShapeStyle(LinearGradient(colors: effect.colors.map(\.color), startPoint: .leading, endPoint: .trailing)),
+                       fill: AnyShapeStyle(Ink.text.opacity(0.85)),
                        label: "Speed", showsPercent: false)
-              .frame(height: 32)
+              .frame(height: 28)
             Image(systemName: "hare").foregroundStyle(Ink.dim)
           }
         }
@@ -441,69 +478,75 @@ struct ContentView: View {
         }
       }
       .padding(16)
-      .card(tint: lights.first.map { room.shown($0).color })
-      .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
+      .card()
+      .transition(.opacity)
       .accessibilityElement(children: .contain)
     }
   }
 
-  private var summary: String {
-    let ready = room.roomReady.filter { $0.caps.contains(.power) }
-    if ready.isEmpty { return "Tap a light to set it up" }
-    let on = ready.filter(\.on).count
-    return on == 0 ? "Everything's off" : on == ready.count ? "Everything's on" : "\(on) of \(ready.count) on"
+  private var scenesHeader: some View {
+    HStack {
+      SectionTitle("Scenes")
+      Spacer()
+      Menu {
+        Button("Pick colors", systemImage: "paintpalette") { sheet = .makeScene }
+        Button("Save the room as it is", systemImage: "square.and.arrow.down") {
+          sceneName = ""
+          savingScene = true
+        }
+        Button("From a photo", systemImage: "photo") { photoPicking = true }
+      } label: {
+        Image(systemName: "plus").font(.body.weight(.semibold)).frame(width: 44, height: 44)
+      }
+      .accessibilityLabel("New scene")
+    }
   }
 
+  /// Scenes say "make my room look like this": one group at a time, picked by name, each scene a small window into a
+  /// dark room lit its way.
   private var scenes: some View {
-    VStack(alignment: .leading, spacing: 12) {
-      HStack {
-        SectionTitle("Scenes")
-        Spacer()
-        Button { room.living.toggle() } label: {
-          Label("Drift", systemImage: room.living ? "wind" : "pause.circle")
-            .font(.subheadline.weight(.semibold))
-            .padding(.horizontal, 14)
-            .frame(minHeight: 44)
-            .foregroundStyle(room.living ? .black : Ink.text)
-            .background(Capsule().fill(room.living ? Ink.text : Ink.raised))
-        }
-        .buttonStyle(Press())
-        .accessibilityLabel("Drift")
-        .accessibilityValue(room.living ? "On" : "Off")
-        .accessibilityHint("Color scenes drift slowly from light to light")
-      }
-      // One row at a time, picked with chips: six stacked rows read as clutter (the "feature overload" reviewers
-      // hold against Govee's app). Opens on Favorites when there are some.
-      let groups = sceneGroups
-      let shown = groups.contains(sceneGroup ?? "") ? sceneGroup! : groups[0]
+    let groups = sceneGroups
+    let shown = groups.contains(sceneGroup ?? "") ? sceneGroup! : groups[0]
+    let list = moods(in: shown)
+    return VStack(alignment: .leading, spacing: 8) {
       ScrollView(.horizontal) {
-        HStack(spacing: 8) {
+        HStack(spacing: 20) {
           ForEach(groups, id: \.self) { g in
             Button {
               withAnimation(Motion.state) { sceneGroup = g }
             } label: {
               Text(g)
-                .font(.footnote.weight(.semibold))
-                .padding(.horizontal, 14)
-                .frame(minHeight: 44)
+                .font(.subheadline.weight(shown == g ? .semibold : .regular))
                 .foregroundStyle(shown == g ? Ink.text : Ink.dim)
-                .background(Capsule().fill(shown == g ? Ink.raised : .clear))
-                .overlay(Capsule().strokeBorder(shown == g ? Ink.line : .clear))
+                .frame(minHeight: 44)
             }
             .buttonStyle(Press())
             .accessibilityAddTraits(shown == g ? .isSelected : [])
           }
         }
+        .padding(.horizontal, 4)
       }
       .scrollIndicators(.hidden)
       .sensoryFeedback(.selection, trigger: shown)
-      sceneRow(moods(in: shown), leading: shown == Mood.Group.mine.rawValue ? AnyView(HStack(alignment: .top, spacing: 16) { makeTile; saveTile; photoTile }) : nil)
-        .id(shown)
-        .transition(.opacity)
+      ScrollView(.horizontal) {
+        HStack(alignment: .top, spacing: 12) {
+          ForEach(list) { sceneTile($0) }
+          if list.isEmpty {
+            Text(shown == Mood.Group.mine.rawValue ? "Make your own with +." : "Press and hold a scene to add it here.")
+              .font(.subheadline)
+              .foregroundStyle(Ink.dim)
+              .frame(height: 80)
+          }
+        }
+        .padding(.horizontal, 4)
+      }
+      .scrollIndicators(.hidden)
+      .id(shown)
+      .transition(.opacity)
     }
     .disabled(room.roomReady.isEmpty)
     .opacity(room.roomReady.isEmpty ? 0.4 : 1)
-    .sensoryFeedback(.selection, trigger: room.mood)
+    .sensoryFeedback(.impact(weight: .light), trigger: room.mood)
     .alert("Save scene", isPresented: $savingScene) {
       TextField("Name", text: $sceneName)
       Button("Save") { room.saveScene(named: sceneName) }
@@ -511,84 +554,8 @@ struct ContentView: View {
     } message: {
       Text("Saves every light in \(room.currentRoom) the way it is now.")
     }
-  }
-
-  private static let favoritesGroup = "Favorites"
-
-  /// Favorites (when there are any), Yours, then the built-in groups.
-  private var sceneGroups: [String] {
-    let favorites = room.favorites.isEmpty ? [] : [Self.favoritesGroup]
-    return favorites + Mood.Group.allCases.map(\.rawValue)
-  }
-
-  private func moods(in group: String) -> [Mood] {
-    if group == Self.favoritesGroup { return room.moods.filter { room.favorites.contains($0.id) } }
-    if group == Mood.Group.mine.rawValue { return room.customScenes }
-    return Mood.all.filter { $0.group.rawValue == group }
-  }
-
-  private func sceneRow(_ moods: [Mood], leading: AnyView? = nil) -> some View {
-    ScrollView(.horizontal) {
-      HStack(alignment: .top, spacing: 16) {
-        if let leading { leading }
-        ForEach(moods) { sceneTile($0) }
-      }
-    }
-    .scrollIndicators(.hidden)
-  }
-
-  private func sceneTile(_ mood: Mood) -> some View {
-    Button { room.apply(mood) } label: {
-      VStack(spacing: 8) {
-        Circle()
-          .fill(AngularGradient(colors: mood.swatch + [mood.swatch[0]], center: .center))
-          .frame(width: 60, height: 60)
-          .padding(4)
-          .overlay(Circle().strokeBorder(Ink.text, lineWidth: room.mood == mood.id ? 2 : 0))
-          .animation(Motion.tap, value: room.mood)
-          .overlay(alignment: .topTrailing) {
-            if room.favorites.contains(mood.id) {
-              Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(Ink.text)
-                .padding(4).background(Circle().fill(Ink.bg))
-            }
-          }
-        Text(mood.id)
-          .font(.caption.weight(.medium))
-          .foregroundStyle(room.mood == mood.id ? Ink.text : Ink.dim)
-          .multilineTextAlignment(.center)
-          .lineLimit(2)
-          .frame(width: 72)
-      }
-    }
-    .buttonStyle(Press())
-    .accessibilityLabel("\(mood.id) scene")
-    .accessibilityHint("Tap again to shuffle its colors. Press and hold to favorite.")
-    .accessibilityAddTraits(room.mood == mood.id ? .isSelected : [])
-    .contextMenu {
-      let favorite = room.favorites.contains(mood.id)
-      Button(favorite ? "Remove from Favorites" : "Add to Favorites", systemImage: favorite ? "star.slash" : "star") {
-        room.toggleFavorite(mood.id)
-      }
-      if mood.group == .mine {
-        Button("Delete scene", systemImage: "trash", role: .destructive) { deletingScene = mood.id }
-      }
-    }
-  }
-
-  /// The system photo picker needs no photo-library permission: the app only gets the one picture you choose.
-  private var photoTile: some View {
-    PhotosPicker(selection: $photo, matching: .images) {
-      VStack(spacing: 8) {
-        Image(systemName: "photo.on.rectangle.angled")
-          .font(.title3.weight(.semibold))
-          .frame(width: 60, height: 60)
-          .background(Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])))
-          .padding(4)
-        Text("From photo").font(.caption.weight(.medium)).foregroundStyle(Ink.dim).frame(width: 72)
-      }
-    }
-    .buttonStyle(Press())
-    .accessibilityLabel("Make a scene from a photo")
+    // The system photo picker needs no photo-library permission: the app only gets the one picture you choose.
+    .photosPicker(isPresented: $photoPicking, selection: $photo, matching: .images)
     .onChange(of: photo) { _, item in
       guard let item else { return }
       Task {
@@ -609,39 +576,104 @@ struct ContentView: View {
     }
   }
 
-  /// Your own color combo: purple and orange for Halloween, blues and magentas for every night. The most common
-  /// wish in Lotus Lamp and DayBetter reviews.
-  private var makeTile: some View {
-    Button { sheet = .makeScene } label: {
-      VStack(spacing: 8) {
-        Image(systemName: "paintpalette")
-          .font(.title3.weight(.semibold))
-          .frame(width: 60, height: 60)
-          .background(Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])))
-          .padding(4)
-        Text("Pick colors").font(.caption.weight(.medium)).foregroundStyle(Ink.dim).frame(width: 72)
-      }
-    }
-    .buttonStyle(Press())
-    .accessibilityLabel("Make a scene from colors you pick")
+  private static let favoritesGroup = "Favorites"
+
+  /// Favorites (when there are any), Yours, then the built-in groups.
+  private var sceneGroups: [String] {
+    let favorites = room.favorites.isEmpty ? [] : [Self.favoritesGroup]
+    return favorites + Mood.Group.allCases.map(\.rawValue)
   }
 
-  private var saveTile: some View {
-    Button {
-      sceneName = ""
-      savingScene = true
-    } label: {
-      VStack(spacing: 8) {
-        Image(systemName: "plus")
-          .font(.title3.weight(.semibold))
-          .frame(width: 60, height: 60)
-          .background(Circle().strokeBorder(Ink.dim, style: StrokeStyle(lineWidth: 1.5, dash: [4, 4])))
-          .padding(4)
-        Text("Save current").font(.caption.weight(.medium)).foregroundStyle(Ink.dim).frame(width: 72)
+  private func moods(in group: String) -> [Mood] {
+    if group == Self.favoritesGroup { return room.moods.filter { room.favorites.contains($0.id) } }
+    if group == Mood.Group.mine.rawValue { return room.customScenes }
+    return Mood.all.filter { $0.group.rawValue == group }
+  }
+
+  private func sceneTile(_ mood: Mood) -> some View {
+    let selected = room.mood == mood.id
+    let shape = RoundedRectangle(cornerRadius: Radius.card, style: .continuous)
+    return Button { room.apply(mood) } label: {
+      VStack(alignment: .leading, spacing: 8) {
+        ScenePreview(mood: mood)
+          .frame(width: 112, height: 80)
+          .clipShape(shape)
+          .overlay(shape.strokeBorder(selected ? Ink.text : Ink.line, lineWidth: selected ? 2 : 1))
+          .overlay(alignment: .topTrailing) {
+            if room.favorites.contains(mood.id) {
+              Image(systemName: "star.fill").font(.caption2).foregroundStyle(.white.opacity(0.9)).padding(8)
+            }
+          }
+        Text(mood.id)
+          .font(.footnote.weight(selected ? .semibold : .regular))
+          .foregroundStyle(selected ? Ink.text : Ink.dim)
+          .lineLimit(1)
+          .frame(width: 112, alignment: .leading)
       }
     }
     .buttonStyle(Press())
-    .accessibilityLabel("Save the room as a scene")
+    .animation(Motion.tap, value: selected)
+    .accessibilityLabel("\(mood.id) scene")
+    .accessibilityHint("Tap again to shuffle its colors. Press and hold to favorite.")
+    .accessibilityAddTraits(selected ? .isSelected : [])
+    .contextMenu {
+      let favorite = room.favorites.contains(mood.id)
+      Button(favorite ? "Remove from Favorites" : "Add to Favorites", systemImage: favorite ? "star.slash" : "star") {
+        room.toggleFavorite(mood.id)
+      }
+      if mood.group == .mine {
+        Button("Delete scene", systemImage: "trash", role: .destructive) { deletingScene = mood.id }
+      }
+    }
+  }
+
+  /// Effects say "keep changing the room". Drift moves a color scene between lights; the rest run on the room's
+  /// strips and Bluetooth bulbs (and the cloud bulb, room-wide). Tap a running one to stop it.
+  private var effects: some View {
+    let canPlay = room.roomReady.contains { $0.kind == .strip || $0.kind == .bleBulb }
+    let playing = room.effectPlaying(on: Room.all)
+    return ScrollView(.horizontal) {
+      HStack(alignment: .top, spacing: 16) {
+        effectTile("Drift", "wind", on: room.living) { room.living.toggle() }
+          .accessibilityHint("Color scenes move slowly from light to light")
+        Group {
+          effectTile("Color cycle", "rainbow", on: playing == .synced) { toggle(.synced) }
+          effectTile("Candle", "flame", on: playing == .candle) { toggle(.candle) }
+          effectTile("Fireplace", "fireplace", on: playing == .fire) { toggle(.fire) }
+          effectTile("Music", "waveform", on: playing == .phoneMic) { toggle(.phoneMic) }
+        }
+        .disabled(!canPlay)
+        .opacity(canPlay ? 1 : 0.4)
+      }
+      .padding(.horizontal, 4)
+    }
+    .scrollIndicators(.hidden)
+    .sensoryFeedback(.impact(weight: .light), trigger: playing)
+  }
+
+  private func toggle(_ e: Effect) {
+    if room.effectPlaying(on: Room.all) == e { room.endEffect() } else { room.start(e, on: Room.all) }
+  }
+
+  private func effectTile(_ name: String, _ icon: String, on: Bool, _ action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      VStack(spacing: 8) {
+        Image(systemName: icon)
+          .font(.title3)
+          .frame(width: 56, height: 56)
+          .foregroundStyle(on ? Ink.inverse : Ink.text)
+          .background(Circle().fill(on ? Ink.text : Ink.raised))
+        Text(name)
+          .font(.footnote.weight(on ? .semibold : .regular))
+          .foregroundStyle(on ? Ink.text : Ink.dim)
+          .lineLimit(1)
+      }
+      .frame(minWidth: 64)
+    }
+    .buttonStyle(Press())
+    .animation(Motion.tap, value: on)
+    .accessibilityLabel(name)
+    .accessibilityValue(on ? "On" : "Off")
   }
 
   private func row(_ item: LightItem) -> some View {
@@ -757,7 +789,7 @@ private struct SceneMaker: View {
         TextField("Name (optional)", text: $name)
           .padding(.horizontal, 16)
           .frame(minHeight: 52)
-          .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised))
+          .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Ink.raised))
         Button {
           room.savePalette(colors, named: name.trimmingCharacters(in: .whitespaces).isEmpty ? "My colors" : name)
           dismiss()
@@ -765,7 +797,7 @@ private struct SceneMaker: View {
           Text("Save and play")
             .font(.body.weight(.semibold))
             .frame(maxWidth: .infinity, minHeight: 52)
-            .foregroundStyle(.black)
+            .foregroundStyle(Ink.inverse)
             .background(Capsule().fill(Ink.text))
         }
         .buttonStyle(Press())
@@ -882,24 +914,96 @@ private struct SectionTitle: View {
   }
 }
 
-private struct PowerButton: View {
+/// The room's power, Dorm Remote's signature control. Off: a dark disc with a quiet ring. On: the ring takes on the
+/// room's live colors and lights its center a little, so every light reads as one room (the app keeps them in step
+/// underneath). State is in the words too, not only the color.
+private struct RoomPower: View {
   let on: Bool
+  let colors: [Color]
   let action: () -> Void
 
   var body: some View {
+    let lit = on && !colors.isEmpty
     Button(action: action) {
-      Image(systemName: "power")
-        .contentShape(Rectangle())
-        .font(.system(size: 15, weight: .semibold))
-        .frame(width: 34, height: 34)
-        .foregroundStyle(on ? .black : Ink.text)
-        .background(Circle().fill(on ? Ink.text : Ink.raised))
-        .frame(width: 44, height: 44)
-        .animation(Motion.state, value: on)
+      ZStack {
+        Circle().fill(Ink.card)
+        if lit {
+          Circle()
+            .fill(RadialGradient(colors: [colors[0].opacity(0.22), .clear], center: .center, startRadius: 0, endRadius: 64))
+          Circle()
+            .strokeBorder(AngularGradient(colors: colors + [colors[0]], center: .center), lineWidth: 4)
+            .shadow(color: colors[0].opacity(0.4), radius: 14)
+        } else {
+          Circle().strokeBorder(Ink.line, lineWidth: 2)
+        }
+        VStack(spacing: 6) {
+          Image(systemName: "power").font(.system(size: 30, weight: .semibold))
+          Text(on ? "On" : "Off").font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
+        }
+        .foregroundStyle(Ink.text)
+      }
+      .frame(width: 128, height: 128)
+      .animation(Motion.mood, value: lit)
+      .animation(Motion.frame, value: colors)
     }
     .buttonStyle(Press())
     .sensoryFeedback(.impact(weight: .medium), trigger: on)
-    .accessibilityLabel(on ? "Turn everything off" : "Turn everything on")
+    .accessibilityLabel("Room power")
+    .accessibilityValue(on ? "On" : "Off")
+    .accessibilityHint(on ? "Turns every light in the room off" : "Turns every light in the room on")
+  }
+}
+
+/// A scene as a small window into a dark room, lit the scene's way: still for whites, a slow breath for a single
+/// color, drifting pools for a palette, a turning hue for Party. The motion is a few percent and slow; with Reduce
+/// Motion it stops.
+private struct ScenePreview: View {
+  let mood: Mood
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+  private enum Kind { case still, breathe, drift, cycle }
+
+  private var kind: Kind {
+    switch mood.look {
+    case .white, .snapshot: .still
+    case .color: .breathe
+    case .palette: .drift
+    case .party: .cycle
+    }
+  }
+
+  var body: some View {
+    TimelineView(.animation(minimumInterval: 1 / 15, paused: reduceMotion || kind == .still)) { context in
+      let t = reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate
+      Canvas { ctx, size in
+        ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Color(hex: 0x0C0C10)))
+        let colors = mood.swatch
+        let n = max(1, min(colors.count, 4))
+        let level = 0.4 + 0.6 * Double(mood.brightness) / 100
+        for i in 0..<n {
+          let phase = Double(i) * 2.1
+          var x = (Double(i) + 0.5) / Double(n)
+          var y = 1.0
+          var alpha = level
+          var color = colors[i % colors.count]
+          switch kind {
+          case .still: break
+          case .breathe: alpha *= 0.88 + 0.12 * sin(t / 2.4)
+          case .drift:
+            x += 0.07 * sin(t / 5 + phase)
+            y += 0.05 * cos(t / 6 + phase)
+          case .cycle:
+            color = Color(hue: (Double(i) / Double(n) + t / 40).truncatingRemainder(dividingBy: 1), saturation: 0.75, brightness: 1)
+          }
+          let center = CGPoint(x: x * size.width, y: y * size.height)
+          let r = size.width * (n == 1 ? 0.95 : 0.62)
+          ctx.fill(Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: 2 * r, height: 2 * r)),
+                   with: .radialGradient(Gradient(colors: [color.opacity(alpha), color.opacity(0)]),
+                                         center: center, startRadius: 0, endRadius: r))
+        }
+      }
+    }
+    .accessibilityHidden(true)
   }
 }
 
@@ -932,63 +1036,56 @@ private struct Orb: View {
   }
 }
 
+/// A light in the room: a dot in its live color, its name, what it's doing in plain words, and a power button.
+/// Tap the row for its controls. No hardware words here (Bluetooth, Hubspace, bridge); Settings has those.
 private struct LightRow: View {
   var room: Room
   let item: LightItem
   let open: () -> Void
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
+    let ready = item.status == .ready
+    let remote = item.caps.contains(.remote)
+    let lit = ready && item.on && !remote
     let glow = room.shown(item).color
-    VStack(spacing: 16) {
-      HStack(spacing: 16) {
-        Orb(item: item, color: room.live[item.id])
-        VStack(alignment: .leading, spacing: 2) {
-          Text(item.name).font(.body.weight(.semibold)).lineLimit(1)
-          Text(status).font(.footnote).foregroundStyle(statusColor).lineLimit(1)
-        }
-        Spacer()
-        if item.caps.contains(.remote), item.status == .ready {
-          Button {
-            room.pressRemotePower(item)
-          } label: {
-            Image(systemName: "power")
-              .font(.body.weight(.semibold))
-              .frame(width: 44, height: 44)
-              .background(Circle().fill(Ink.raised))
-          }
-          .buttonStyle(Press())
-          .accessibilityLabel("\(item.name) power")
-        } else if item.status == .ready {
-          Toggle(item.name, isOn: Binding(get: { item.on }, set: { room.setPower(item.id, $0) }))
-            .labelsHidden()
-            .tint(glow)
-        } else {
-          Image(systemName: "chevron.right").foregroundStyle(Ink.dim)
-        }
+    HStack(spacing: 12) {
+      Circle()
+        .fill(lit ? glow : Ink.raised)
+        .frame(width: 12, height: 12)
+        .shadow(color: lit ? glow.opacity(0.6) : .clear, radius: 6)
+        .animation(Motion.frame, value: room.shown(item))
+        .accessibilityHidden(true)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(item.name).font(.body.weight(.medium)).foregroundStyle(ready ? Ink.text : Ink.dim).lineLimit(1)
+        Text(status).font(.subheadline).foregroundStyle(statusColor).lineLimit(1)
       }
-      if item.status == .ready, item.on {
-        PillSlider(
-          value: Binding(get: { Double(item.brightness) / 100 }, set: { room.setBrightness(item.id, Int(($0 * 100).rounded())) }),
-          fill: AnyShapeStyle(glow),
-          label: "Brightness"
-        )
-        .frame(height: 44)
-        // Reduce Motion: fade only, no slide.
-        .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
+      Spacer(minLength: 8)
+      if ready {
+        Button {
+          if remote { room.pressRemotePower(item) } else { room.setPower(item.id, !item.on) }
+        } label: {
+          Image(systemName: "power")
+            .font(.subheadline.weight(.semibold))
+            .frame(width: 34, height: 34)
+            .foregroundStyle(lit ? Color.black.opacity(0.75) : Ink.text)
+            .background(Circle().fill(lit ? glow : Ink.raised))
+            .frame(width: 44, height: 44)
+        }
+        .buttonStyle(Press())
+        .accessibilityLabel(remote ? "\(item.name) power" : item.on ? "Turn off \(item.name)" : "Turn on \(item.name)")
+      } else {
+        Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
       }
     }
-    .padding(16)
-    .card(tint: item.status == .ready && item.on && !item.caps.contains(.remote) ? glow : nil)
-    .opacity(item.kind == .remote && item.status != .ready ? 0.55 : 1)
-    .contentShape(RoundedRectangle(cornerRadius: 24))
+    .padding(.vertical, 4)
+    .contentShape(Rectangle())
     .onTapGesture(perform: open)
     .sensoryFeedback(.impact(weight: .light), trigger: item.on)
     .animation(Motion.state, value: item.on)
     .accessibilityElement(children: .contain)
     .accessibilityAction(named: "Open \(item.name)", open)
     .contextMenu {
-      if item.status == .ready, item.caps.contains(.power) {
+      if ready, item.caps.contains(.power) {
         Button("Blink", systemImage: "light.max") { room.identify(item.id) }
       }
     }
@@ -997,16 +1094,16 @@ private struct LightRow: View {
   private var status: String {
     switch item.status {
     case .ready:
-      if item.caps.contains(.remote) { return "Tap for the remote" }
+      if item.caps.contains(.remote) { return "Remote" }
       guard item.on else { return "Off" }
       if let effect = room.effectPlaying(on: item.id) { return effect.name }
       if let effect = item.effect { return HubspaceClient.effectName(effect) }
-      // "Purple · 60%": the color in words (no judging swatches) and the level at a glance.
+      // "Purple · 60%": the color in words and the level at a glance.
       let look = item.kelvin.map { $0 <= 3300 ? "Warm white" : $0 >= 5000 ? "Cool white" : "White" } ?? item.color.name
       return "\(look) · \(item.brightness)%"
-    case .setup: return item.kind == .remote ? "Needs the IR bridge" : "Tap to set up"
-    case .busy(let s): return s + "…"
-    case .offline(let s): return s
+    case .setup: return "Not set up"
+    case .busy: return "Connecting"
+    case .offline: return "Not reachable"
     }
   }
 
@@ -1034,7 +1131,7 @@ private struct PillSlider: View {
           Text("\(Int((value * 100).rounded()))%")
             .font(.footnote.weight(.semibold))
             .monospacedDigit()
-            .foregroundStyle(value > 0.85 ? .black : Ink.text)
+            .foregroundStyle(value > 0.85 ? Ink.inverse : Ink.text)
             .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.horizontal, 14)
             .allowsHitTesting(false)
@@ -1347,7 +1444,7 @@ private struct LightSheet: View {
               .font(.subheadline.weight(.semibold))
               .padding(.horizontal, 16)
               .frame(minHeight: 44)
-              .foregroundStyle(.black)
+              .foregroundStyle(Ink.inverse)
               .background(Capsule().fill(Ink.text))
           }
           .buttonStyle(Press())
@@ -1437,8 +1534,8 @@ private struct LightSheet: View {
       .padding(.horizontal, 14)
       .frame(maxWidth: .infinity, minHeight: 56)
       // The running effect lights up in its own colors.
-      .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised))
-      .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(active ? Ink.text : Ink.line, lineWidth: active ? 1.5 : 1))
+      .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Ink.raised))
+      .overlay(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).strokeBorder(active ? Ink.text : Ink.line, lineWidth: active ? 1.5 : 1))
       .animation(Motion.state, value: active)
     }
     .buttonStyle(Press())
@@ -1669,7 +1766,7 @@ private struct StripSetup: View {
                 }
               }
               .padding(16)
-              .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+              .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous).fill(Ink.raised.opacity(0.6)))
               .transition(.opacity)
             }
           }
@@ -1688,7 +1785,7 @@ private struct StripSetup: View {
                 SignalBars(rssi: device.rssi)
               }
               .padding(16)
-              .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+              .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous).fill(Ink.raised.opacity(0.6)))
             }
             .buttonStyle(Press())
           }
@@ -1768,7 +1865,7 @@ private struct AddSheet: View {
             Image(systemName: "chevron.right").foregroundStyle(Ink.dim)
           }
           .padding(16)
-          .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+          .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous).fill(Ink.raised.opacity(0.6)))
         }
         .buttonStyle(Press())
       }
@@ -1828,7 +1925,7 @@ private struct LampSetup: View {
               SignalBars(rssi: device.rssi)
             }
             .padding(16)
-            .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Ink.raised.opacity(0.6)))
+            .background(RoundedRectangle(cornerRadius: Radius.card, style: .continuous).fill(Ink.raised.opacity(0.6)))
           }
           .buttonStyle(Press())
         }
@@ -1923,7 +2020,7 @@ private struct HubSetup: View {
       input()
         .padding(.horizontal, 16)
         .frame(minHeight: 52)
-        .background(Ink.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .background(Ink.raised, in: RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
     }
   }
 
@@ -1932,7 +2029,7 @@ private struct HubSetup: View {
       Text(title)
         .font(.body.weight(.semibold))
         .frame(maxWidth: .infinity, minHeight: 52)
-        .foregroundStyle(.black)
+        .foregroundStyle(Ink.inverse)
         .background(Capsule().fill(Ink.text))
     }
     .buttonStyle(Press())
@@ -2086,12 +2183,12 @@ private struct WalkInSection: View {
       HStack(spacing: 12) {
         Button { walkIn.setSpot() } label: {
           HStack(spacing: 8) {
-            if walkIn.measuring { ProgressView().tint(.black) }
+            if walkIn.measuring { ProgressView().tint(Ink.inverse) }
             Text(walkIn.measuring ? "Measuring…" : walkIn.spot == nil ? "Set my spot" : "Set it again")
           }
           .font(.body.weight(.semibold))
           .frame(maxWidth: .infinity, minHeight: 52)
-          .foregroundStyle(.black)
+          .foregroundStyle(Ink.inverse)
           .background(Capsule().fill(Ink.text))
         }
         .buttonStyle(Press())
@@ -2188,7 +2285,7 @@ private struct ScheduleSection: View {
           Text("Open Shortcuts")
             .font(.body.weight(.semibold))
             .frame(maxWidth: .infinity, minHeight: 52)
-            .foregroundStyle(.black)
+            .foregroundStyle(Ink.inverse)
             .background(Capsule().fill(Ink.text))
         }
         .buttonStyle(Press())
@@ -2242,7 +2339,7 @@ private struct AutomationsTab: View {
           Image(systemName: icon)
             .font(.body.weight(.semibold))
             .frame(width: 44, height: 44)
-            .foregroundStyle(on?.wrappedValue == true ? .black : Ink.text)
+            .foregroundStyle(on?.wrappedValue == true ? Ink.inverse : Ink.text)
             .background(Circle().fill(on?.wrappedValue == true ? Ink.text : Ink.raised))
           VStack(alignment: .leading, spacing: 2) {
             Text(title).font(.body.weight(.semibold))
@@ -2336,7 +2433,7 @@ private struct ScanSheet: View {
                 Text(n.map(String.init) ?? "")
                   .font(.subheadline.weight(.bold).monospacedDigit())
                   .frame(width: 28, height: 28)
-                  .foregroundStyle(n == nil ? Ink.dim : .black)
+                  .foregroundStyle(n == nil ? Ink.dim : Ink.inverse)
                   .background(Circle().fill(n == nil ? Ink.raised : Ink.text))
                 Orb(item: light, color: room.live[light.id], size: 32)
                 Text(light.name).font(.body.weight(.semibold))
@@ -2347,7 +2444,7 @@ private struct ScanSheet: View {
               }
               .padding(.horizontal, 12)
               .frame(minHeight: 52)
-              .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised.opacity(0.6)))
+              .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Ink.raised.opacity(0.6)))
             }
             .buttonStyle(Press())
             .accessibilityLabel(n.map { "\(light.name), number \($0)" } ?? light.name)
@@ -2364,7 +2461,7 @@ private struct ScanSheet: View {
     VStack(alignment: .leading, spacing: 16) {
       ZStack {
         CameraView(session: scanner.session)
-          .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+          .clipShape(RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
         // The circle the app watches: a fifth of the width, same as LightScanner.measure.
         GeometryReader { geo in
           let d = geo.size.width / 5
@@ -2410,7 +2507,7 @@ private struct ScanSheet: View {
                 }
                 .padding(.horizontal, 14)
                 .frame(minHeight: 44)
-                .foregroundStyle(scanner.current == id ? .black : Ink.text)
+                .foregroundStyle(scanner.current == id ? Ink.inverse : Ink.text)
                 .background(Capsule().fill(scanner.current == id ? Ink.text : Ink.raised))
               }
               .buttonStyle(Press())
@@ -2491,7 +2588,7 @@ private struct ScanSheet: View {
       Text(title)
         .font(.body.weight(.semibold))
         .frame(maxWidth: .infinity, minHeight: 52)
-        .foregroundStyle(.black)
+        .foregroundStyle(Ink.inverse)
         .background(Capsule().fill(Ink.text))
     }
     .buttonStyle(Press())
@@ -2582,7 +2679,7 @@ private struct MapScreen: View {
         Label(placed ? "Scan again" : "Find my lights with the camera", systemImage: "viewfinder")
           .font(.body.weight(.semibold))
           .frame(maxWidth: .infinity, minHeight: 52)
-          .foregroundStyle(placed ? Ink.text : .black)
+          .foregroundStyle(placed ? Ink.text : Ink.inverse)
           .background(Capsule().fill(placed ? Ink.raised : Ink.text))
       }
       .buttonStyle(Press())
@@ -2609,7 +2706,7 @@ private struct MapScreen: View {
         (min(f.minX + f.span, max(f.minX, Double(p.x) / scale + f.minX)), min(f.minY + f.span, max(f.minY, Double(p.y) / scale + f.minY)))
       }
       ZStack {
-        RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Ink.card)
+        RoundedRectangle(cornerRadius: Radius.feature, style: .continuous).fill(Ink.card)
         // A 1 m grid, so distances read at a glance.
         Path { path in
           var v = ceil(f.minX)
@@ -2628,7 +2725,7 @@ private struct MapScreen: View {
           }
         }
         .stroke(Ink.line, lineWidth: 1)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Radius.feature, style: .continuous))
         Text("1 m squares · up is the way you faced when scanning")
           .font(.caption2)
           .foregroundStyle(Ink.dim)
@@ -2763,7 +2860,7 @@ private struct MapScreen: View {
                 .font(.footnote.weight(.semibold))
                 .padding(.horizontal, 14)
                 .frame(minHeight: 44)
-                .foregroundStyle(on ? .black : Ink.text)
+                .foregroundStyle(on ? Ink.inverse : Ink.text)
                 .background(Capsule().fill(on ? Ink.text : Ink.raised))
             }
             .buttonStyle(Press())
@@ -2880,7 +2977,7 @@ private struct RemoteSheet: View {
           Button("Cancel") { bridge.cancelLearning() }
         }
         .padding(16)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Ink.raised))
+        .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(Ink.raised))
       }
       LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
         ForEach(buttons) { button in
@@ -2893,7 +2990,7 @@ private struct RemoteSheet: View {
               Text(button.name).font(.caption.weight(.medium)).lineLimit(1)
             }
             .frame(maxWidth: .infinity, minHeight: 72)
-            .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous)
               .fill(Ink.raised))
             .opacity(ready || learnMode ? 1 : 0.45)
             .overlay(alignment: .topTrailing) {
@@ -2949,7 +3046,7 @@ private struct AddRemoteSheet: View {
           TextField("", text: $name, prompt: Text("e.g. Galaxy projector, Fan"))
             .padding(.horizontal, 16)
             .frame(minHeight: 52)
-            .background(Ink.raised, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(Ink.raised, in: RoundedRectangle(cornerRadius: Radius.control, style: .continuous))
         }
         VStack(alignment: .leading, spacing: 8) {
           Text("Buttons").font(.subheadline).foregroundStyle(Ink.dim)
@@ -2962,7 +3059,7 @@ private struct AddRemoteSheet: View {
               }
               .padding(.horizontal, 16)
               .frame(minHeight: 48)
-              .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(template == t.name ? Ink.raised : Ink.raised.opacity(0.4)))
+              .background(RoundedRectangle(cornerRadius: Radius.control, style: .continuous).fill(template == t.name ? Ink.raised : Ink.raised.opacity(0.4)))
             }
             .buttonStyle(Press())
           }
@@ -2974,7 +3071,7 @@ private struct AddRemoteSheet: View {
           Text("Add")
             .font(.body.weight(.semibold))
             .frame(maxWidth: .infinity, minHeight: 52)
-            .foregroundStyle(.black)
+            .foregroundStyle(Ink.inverse)
             .background(Capsule().fill(Ink.text))
         }
         .buttonStyle(Press())
@@ -3012,8 +3109,12 @@ extension Color {
     self.init(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
   }
 
-  /// A color that switches to `contrast` when Increase Contrast is on.
-  init(hex: UInt32, contrast: UInt32) {
-    self.init(UIColor { UIColor(Color(hex: $0.accessibilityContrast == .high ? contrast : hex)) })
+  /// A color with light and dark values, each with an optional Increase Contrast variant.
+  init(dark: UInt32, light: UInt32, darkContrast: UInt32? = nil, lightContrast: UInt32? = nil) {
+    self.init(UIColor { t in
+      let high = t.accessibilityContrast == .high
+      let hex = t.userInterfaceStyle == .dark ? (high ? darkContrast ?? dark : dark) : (high ? lightContrast ?? light : light)
+      return UIColor(Color(hex: hex))
+    })
   }
 }

@@ -1,0 +1,72 @@
+name: Screenshots
+
+# Renders every tab in the iOS Simulator, in light and dark, with the app's -demo sample lights (the simulator has
+# no Bluetooth or Hubspace). The PNGs are the design review: look at them after each pass, not just the code.
+on:
+  push:
+    branches: [main]
+    paths: ["DormRemote/**", "project.yml", ".github/workflows/screenshots.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shots:
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_26.6.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Pick an iPhone simulator
+        run: |
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          runtimes = sorted((k for k in devices if "iOS" in k), reverse=True)
+          phones = [d for k in runtimes for d in devices[k] if d["name"].startswith("iPhone") and "Pro" in d["name"] and "Max" not in d["name"]]
+          phones = phones or [d for k in runtimes for d in devices[k] if d["name"].startswith("iPhone")]
+          print(phones[0]["udid"])')
+          echo "SIMULATOR_UDID=$UDID" >> "$GITHUB_ENV"
+
+      - name: Build for the simulator
+        run: |
+          set -o pipefail
+          xcodebuild build -project DormRemote.xcodeproj -scheme DormRemote -destination "id=$SIMULATOR_UDID" \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO 2>&1 | tail -5
+
+      - name: Take screenshots
+        run: |
+          APP=build/Build/Products/Debug-iphonesimulator/DormRemote.app
+          BID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$APP/Info.plist")
+          xcrun simctl boot "$SIMULATOR_UDID"
+          xcrun simctl bootstatus "$SIMULATOR_UDID" -b
+          xcrun simctl status_bar "$SIMULATOR_UDID" override --time 9:41 --batteryState charged --batteryLevel 100 --cellularBars 4 --wifiBars 3
+          xcrun simctl install "$SIMULATOR_UDID" "$APP"
+          xcrun simctl privacy "$SIMULATOR_UDID" grant location-always "$BID" || true
+          mkdir -p shots
+          for mode in dark light; do
+            xcrun simctl ui "$SIMULATOR_UDID" appearance $mode
+            for tab in room map automations settings; do
+              xcrun simctl terminate "$SIMULATOR_UDID" "$BID" 2>/dev/null || true
+              xcrun simctl launch "$SIMULATOR_UDID" "$BID" -demo -tab $tab -walkIn YES -selectedRoom Bedroom
+              sleep 7
+              xcrun simctl io "$SIMULATOR_UDID" screenshot "shots/$tab-$mode.png"
+            done
+          done
+          ls -la shots
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: screenshots
+          path: shots
+          retention-days: 7

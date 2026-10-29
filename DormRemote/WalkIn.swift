@@ -111,6 +111,9 @@ final class WalkIn: NSObject {
   }()
 
   /// When you left. Saved, since iOS may relaunch the app between leaving and coming back.
+  /// Away since leaving, until you're back: "Away" or "You're home" on the Room tab.
+  var isAway: Bool { awaySince != nil }
+
   private var awaySince = UserDefaults.standard.object(forKey: "walkInAway") as? Date {
     didSet { UserDefaults.standard.set(awaySince, forKey: "walkInAway") }
   }
