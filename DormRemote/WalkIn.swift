@@ -67,24 +67,18 @@ final class WalkIn: NSObject {
       updateWatch()
     }
   }
-  /// The bridge's signal from your phone (dBm) where everything turns off on the way out. The bridge watches for it
-  /// (firmware/src/main.cpp) and wakes the app. Nil: off when iOS notices you've gone instead (the beacon, about
-  /// 30 s after you leave its range).
-  private(set) var leaveSpot = UserDefaults.standard.object(forKey: "walkInLeaveSpot") as? Int {
+  /// Your zones from the guided setup: the bridge's signal from your phone in the room, in the doorway, and outside
+  /// in the hall (dBm). The bridge's engine turns them into "you left" and "you came in" (firmware/src/main.cpp).
+  private(set) var zones: [Int]? = (UserDefaults.standard.array(forKey: "walkInZones") as? [Int]).flatMap { $0.count == 3 ? $0 : nil } {
     didSet {
-      UserDefaults.standard.set(leaveSpot, forKey: "walkInLeaveSpot")
+      UserDefaults.standard.set(zones, forKey: "walkInZones")
       updateWatch()
     }
   }
-  /// The same reading at your door, coming in: the bridge says when you reach it.
-  private(set) var doorSpot = UserDefaults.standard.object(forKey: "walkInDoorSpot") as? Int {
-    didSet {
-      UserDefaults.standard.set(doorSpot, forKey: "walkInDoorSpot")
-      updateWatch()
-    }
-  }
-  private(set) var measuringLeave = false
-  var leaveError: String?
+  /// Setup in progress: each zone's reading as it's measured (room, doorway, hall), and which one is being measured.
+  private(set) var zoneReadings: [Int?] = [nil, nil, nil]
+  private(set) var measuringZone: Int?
+  var zoneError: String?
   /// Coming back with a door spot set: wait for the bridge to see you reach it, until then.
   private var doorWait: Date?
   /// Location: the room beacon and the circle around home. Both need "Always" so iOS can wake the app.
@@ -163,8 +157,8 @@ final class WalkIn: NSObject {
 
   weak var room: Room? {
     didSet {
-      room?.bridge.onPresence = { [weak self] arrived, rssi in
-        MainActor.assumeIsolated { self?.bridgeSaw(arrived: arrived, rssi: rssi) }
+      room?.bridge.onPresence = { [weak self] arrived, rssi, margin in
+        MainActor.assumeIsolated { self?.bridgeSaw(arrived: arrived, rssi: rssi, margin: margin) }
       }
       room?.bridge.onLink = { [weak self] up in
         MainActor.assumeIsolated { if !up { self?.bridgeDropped() } }
@@ -224,59 +218,66 @@ final class WalkIn: NSObject {
     }
   }
 
-  // MARK: The bridge's spots
+  // MARK: Your doorway (the bridge's zones)
 
-  /// Stand where everything should go off on the way out and call this: the bridge measures its link to your phone.
-  /// It has to be somewhere the bridge (and the strips) still reach.
-  func setLeaveSpot() {
-    measureBridge { [weak self] rssi in
-      guard let self else { return }
-      guard let rssi else {
-        self.leaveError = "Your IR bridge can't hear your phone here, so this is past its range. Try a spot closer to your room."
-        return
-      }
-      self.leaveError = nil
-      self.leaveSpot = rssi
-      self.note("Leaving spot set at \(rssi) dBm.")
+  /// Guided setup, step `i` (0 room, 1 doorway, 2 hall): the bridge measures where you stand for about 4 s.
+  func measureZone(_ i: Int) {
+    guard let room, room.bridge.state == .ready else {
+      zoneError = "Your IR bridge isn't connected. Plug it in and open this page in your room."
+      return
     }
-  }
-
-  func clearLeaveSpot() { leaveSpot = nil }
-
-  /// Six readings over about three seconds, averaged.
-  private func measureBridge(_ done: @escaping (Int?) -> Void) {
-    guard let room, room.bridge.state == .ready else { return done(nil) }
-    measuringLeave = true
-    var readings: [Int] = []
-    func next(_ left: Int) {
-      room.bridge.readLinkRSSI { [weak self] rssi in
-        MainActor.assumeIsolated {
-          if let rssi { readings.append(rssi) }
-          if left > 1 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { MainActor.assumeIsolated { next(left - 1) } }
-            return
-          }
-          self?.measuringLeave = false
-          done(readings.isEmpty ? nil : readings.reduce(0, +) / readings.count)
+    zoneError = nil
+    measuringZone = i
+    // The bridge numbers zones from the outside in: 0 hall, 1 doorway, 2 room.
+    room.bridge.measureZone(2 - i) { [weak self] rssi in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.measuringZone = nil
+        guard let rssi else {
+          self.zoneError = i == 2
+            ? "Your IR bridge can't hear your phone out there. Step back toward your door, just outside it, and try again."
+            : "Couldn't get a reading. Try again."
+          return
         }
+        self.zoneReadings[i] = rssi
+        self.finishZones()
       }
     }
-    next(6)
   }
 
-  /// Keeps the bridge's spots in step with the settings.
+  /// Three readings in: they have to step down from room to doorway to hall, or the doorway can't be told apart.
+  private func finishZones() {
+    guard let r = zoneReadings[0], let d = zoneReadings[1], let h = zoneReadings[2] else { return }
+    guard r - d >= 3, d - h >= 3 else {
+      zoneError = r - d < 3
+        ? "Your room and doorway read almost the same. Measure the room from farther in, or move the bridge away from the door."
+        : "Your doorway and the hall read almost the same. Step a little farther out for the hall."
+      zoneReadings = [nil, nil, nil]
+      return
+    }
+    zones = [r, d, h]
+    note("Doorway set up: room \(r), doorway \(d), hall \(h) dBm.")
+  }
+
+  func redoZones() {
+    zoneReadings = [nil, nil, nil]
+    zones = nil
+    zoneError = nil
+  }
+
+  /// Keeps the bridge's zones in step with the settings.
   private func updateWatch() {
-    room?.bridge.setSpots(arrive: enabled ? doorSpot : nil, leave: enabled && offWhenLeaving ? leaveSpot : nil)
+    room?.bridge.setZones(enabled ? zones : nil)
   }
 
-  private func bridgeSaw(arrived: Bool, rssi: Int) {
+  private func bridgeSaw(arrived: Bool, rssi: Int, margin: Int) {
     guard enabled else { return }
     if arrived {
       guard let since = awaySince else { return }
       doorWait = nil
-      comeBack(since: since, via: "You reached your door (\(rssi) dBm)", strip: nil, atDoor: true)
+      comeBack(since: since, via: "You came through your door", strip: nil, atDoor: true)
     } else if awaySince == nil {
-      left("You passed your leaving spot (\(rssi) dBm).")
+      left("You went out your door (\(margin) dB past it).")
     }
   }
 
@@ -325,7 +326,7 @@ final class WalkIn: NSObject {
     // Already waiting for the bridge to see you at the door: a strip or the beacon coming back adds nothing.
     if !atDoor, doorWait != nil { return }
     // With a door spot on the bridge, wait for the bridge to say you're there, unless it never connects.
-    if !atDoor, doorSpot != nil, let room, Date().timeIntervalSince(since) >= Double(awayMinutes) * 60 {
+    if !atDoor, zones != nil, let room, Date().timeIntervalSince(since) >= Double(awayMinutes) * 60 {
       doorWait = Date().addingTimeInterval(Self.spotWait)
       note("\(via). Waiting for you to reach your door.")
       beginBackground()
@@ -510,11 +511,6 @@ final class WalkIn: NSObject {
   /// Stand at your door and call this: averages a few readings from the nearest connected strip.
   func setSpot() {
     measureBeacon()
-    measureBridge { [weak self] rssi in
-      guard let self, let rssi else { return }
-      self.doorSpot = rssi
-      self.note("Door spot set on the bridge at \(rssi) dBm.")
-    }
     guard let room, let strip = connected.first(where: { s in
       room.item(Room.stripItemID(s.id)).map { room.roomOf($0) == room.currentRoom } ?? false
     }) ?? connected.first else {
@@ -552,7 +548,6 @@ final class WalkIn: NSObject {
   func clearSpot() {
     spot = nil
     beaconSpot = nil
-    doorSpot = nil
   }
 
   /// Three seconds of beacon readings where you stand. Skipped quietly when location is off or no bridge is near.

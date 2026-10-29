@@ -12,13 +12,20 @@
 //   00 status                01 = sent, 02 = unsupported protocol
 //   10 type bits v0..v7      learned code, same layout as command 02
 //
-// Presence, the way ESP32 room sensors (ESPresense, Bermuda) do it: the board watches your phone's signal on its
-// own connection and tells the phone when you pass a spot. A notification from a connected accessory wakes the app
-// even in the background, so the app doesn't have to stay awake to notice you leave.
-//   20 arrive leave          set the spots, in dBm (signed byte; 0 = off)
+// Presence: which side of your door you're on, from the signal of the board's own connection to your phone. A live
+// connection keeps exchanging packets while the phone is locked in a pocket, unlike the advertisements passive
+// room sensors (ESPresense, Bermuda) listen for, which a locked iPhone can stop sending. The engine:
+//   readings every 300 ms → median of the last 5 (drops spikes) → smoothed → zone (room / doorway / hall), with
+//   hysteresis at each boundary → a new zone only after it holds (about 1 s; 1.2 s for the hall) → events:
+//   leaving = into the hall while home; arriving = into the doorway or room while away. Standing in the doorway and
+//   going back in does nothing; after leaving, coming back through the doorway within 20 s needs to reach the room.
+// A notification from a connected accessory wakes the app even in the background.
+//   30 zone                  measure a zone for setup (0 hall, 1 doorway, 2 room): about 4 s of readings
+//   31 room door hall        the zones' signals from setup, in dBm (signed bytes); all 0 = off
 //   22                       read the link's signal now
 // Replies:
-//   21 in rssi               01 = reached the door spot coming in, 00 = passed the leaving spot going out
+//   30 zone rssi             the measured zone's median signal (0 = no readings)
+//   21 in rssi margin        01 = you arrived, 00 = you left; margin = dB past the boundary (confidence)
 //   22 rssi                  the link's signal now, smoothed (0 = no reading yet)
 //
 // Room beacon: every other second the board advertises as an iBeacon (UUID D0A1E7B2-6F2C-4C8B-9E31-5B7A0C1D2E3F,
@@ -59,23 +66,35 @@ static uint32_t lastSwap = 0;
 // Presence state for the phone's connection.
 static const uint16_t kNoPhone = 0xFFFF;
 static volatile uint16_t phone = kNoPhone;
-static int8_t arriveAt = 0, leaveAt = 0;
+enum Zone : int8_t { Unknown = -1, Hall = 0, Door = 1, InRoom = 2 };
+static int8_t zoneSignal[3] = {0, 0, 0};  // hall, doorway, room
+static Zone zone = Unknown, candidate = Unknown;
+static uint8_t holds = 0;
+static int8_t home = -1;  // -1 not known yet, 0 away, 1 home
+static uint32_t lastLeave = 0, lastSample = 0;
+static int8_t recent[5];
+static uint8_t recentCount = 0, recentAt = 0;
 static float smooth = 0;
-static int8_t inside = -1;  // -1 not decided yet, 0 out, 1 in
-static uint8_t streak = 0;
-static uint32_t lastPresence = 0;
+static int8_t measuringZone = -1;
+static int8_t measured[16];
+static uint8_t measuredCount = 0;
+static uint32_t measureStart = 0;
 
 // Advertising stops when the phone connects; keep it going so the beacon stays visible while you're home.
 class KeepAdvertising : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *s, NimBLEConnInfo &info) override {
     phone = info.getConnHandle();
     smooth = 0;
-    inside = -1;
-    streak = 0;
+    recentCount = 0;
+    zone = candidate = Unknown;
+    holds = 0;
     NimBLEDevice::startAdvertising();
   }
   void onDisconnect(NimBLEServer *s, NimBLEConnInfo &info, int reason) override {
-    if (info.getConnHandle() == phone) phone = kNoPhone;
+    if (info.getConnHandle() != phone) return;
+    phone = kNoPhone;
+    // Out of range: you're away. Coming back through the doorway is then an arrival.
+    if (zoneSignal[0] != 0) home = 0;
   }
 };
 
@@ -121,12 +140,19 @@ class Commands : public NimBLECharacteristicCallbacks {
         learning = true;
         irrecv.resume();
         break;
-      case 0x20:
-        if (v.size() < 3) return;
-        arriveAt = static_cast<int8_t>(b[1]);
-        leaveAt = static_cast<int8_t>(b[2]);
-        inside = -1;
-        streak = 0;
+      case 0x30:
+        if (v.size() < 2 || b[1] > 2) return;
+        measuringZone = b[1];
+        measuredCount = 0;
+        measureStart = millis();
+        break;
+      case 0x31:
+        if (v.size() < 4) return;
+        zoneSignal[2] = static_cast<int8_t>(b[1]);
+        zoneSignal[1] = static_cast<int8_t>(b[2]);
+        zoneSignal[0] = static_cast<int8_t>(b[3]);
+        zone = candidate = Unknown;
+        holds = 0;
         break;
       case 0x22: {
         uint8_t out[] = {0x22, static_cast<uint8_t>(static_cast<int8_t>(lroundf(smooth)))};
@@ -167,40 +193,92 @@ void setup() {
   Serial.println("DormBridge ready");
 }
 
-// Twice a second: smooth the phone's signal, and report crossing a spot (two readings in a row coming in, three going
-// out, so one bad reading doesn't count).
+static int8_t median5() {
+  int8_t s[5];
+  for (uint8_t i = 0; i < recentCount; i++) s[i] = recent[i];
+  for (uint8_t i = 1; i < recentCount; i++)
+    for (uint8_t j = i; j > 0 && s[j - 1] > s[j]; j--) { int8_t t = s[j]; s[j] = s[j - 1]; s[j - 1] = t; }
+  return s[recentCount / 2];
+}
+
+// Boundaries halfway between the zones' signals, with 2.5 dB of hysteresis that favors staying where you are.
+static Zone classify(float s) {
+  const float h = 2.5f;
+  float inside = (zoneSignal[2] + zoneSignal[1]) / 2.0f, outside = (zoneSignal[1] + zoneSignal[0]) / 2.0f;
+  switch (zone) {
+    case InRoom: return s >= inside - h ? InRoom : (s >= outside - h ? Door : Hall);
+    case Hall:   return s <= outside + h ? Hall : (s <= inside + h ? Door : InRoom);
+    case Door:   return s > inside + h ? InRoom : (s < outside - h ? Hall : Door);
+    default:     return s >= inside ? InRoom : (s >= outside ? Door : Hall);
+  }
+}
+
+static void event(bool arrived, float s) {
+  float outside = (zoneSignal[1] + zoneSignal[0]) / 2.0f;
+  int margin = static_cast<int>(lroundf(arrived ? s - outside : outside - s));
+  uint8_t out[] = {0x21, static_cast<uint8_t>(arrived ? 1 : 0), static_cast<uint8_t>(static_cast<int8_t>(lroundf(s))),
+                   static_cast<uint8_t>(constrain(margin, 0, 127))};
+  reply(out, sizeof out);
+}
+
+static void moved(Zone to, float s) {
+  Zone from = zone;
+  zone = to;
+  if (home == -1) {  // first zone after power-up: just note where you are
+    home = to == Hall ? 0 : 1;
+    return;
+  }
+  if (to == Hall && home == 1) {
+    home = 0;
+    lastLeave = millis();
+    event(false, s);
+  } else if (to != Hall && home == 0) {
+    // Lingering outside your door right after leaving shouldn't bring the lights back: within 20 s, only the room counts.
+    if (to == Door && millis() - lastLeave < 20000) return;
+    home = 1;
+    event(true, s);
+  }
+  (void)from;
+}
+
+// Every 300 ms: one reading, filtered, classified, and committed once it holds.
 static void watchPresence() {
-  if (phone == kNoPhone || millis() - lastPresence < 500) return;
-  lastPresence = millis();
+  if (phone == kNoPhone || millis() - lastSample < 300) return;
+  lastSample = millis();
   int8_t rssi;
   if (ble_gap_conn_rssi(phone, &rssi) != 0 || rssi == 127) return;
-  smooth = smooth == 0 ? rssi : smooth * 0.7f + rssi * 0.3f;
-  int8_t now = static_cast<int8_t>(lroundf(smooth));
-  if (inside == -1) {
-    // First reading on this connection: already past the door spot counts as arriving.
-    inside = (arriveAt == 0 || now >= arriveAt) ? 1 : 0;
-    if (arriveAt != 0 && inside == 1) {
-      uint8_t out[] = {0x21, 0x01, static_cast<uint8_t>(now)};
+  recent[recentAt] = rssi;
+  recentAt = (recentAt + 1) % 5;
+  if (recentCount < 5) recentCount++;
+  int8_t filtered = median5();
+  smooth = smooth == 0 ? filtered : smooth * 0.6f + filtered * 0.4f;
+
+  if (measuringZone >= 0) {
+    if (measuredCount < 16) measured[measuredCount++] = filtered;
+    if (millis() - measureStart > 4000) {
+      int8_t s[16];
+      for (uint8_t i = 0; i < measuredCount; i++) s[i] = measured[i];
+      for (uint8_t i = 1; i < measuredCount; i++)
+        for (uint8_t j = i; j > 0 && s[j - 1] > s[j]; j--) { int8_t t = s[j]; s[j] = s[j - 1]; s[j - 1] = t; }
+      uint8_t out[] = {0x30, static_cast<uint8_t>(measuringZone), static_cast<uint8_t>(measuredCount ? s[measuredCount / 2] : 0)};
       reply(out, sizeof out);
+      measuringZone = -1;
     }
     return;
   }
-  if (inside == 1 && leaveAt != 0 && now <= leaveAt) {
-    if (++streak >= 3) {
-      inside = 0;
-      streak = 0;
-      uint8_t out[] = {0x21, 0x00, static_cast<uint8_t>(now)};
-      reply(out, sizeof out);
-    }
-  } else if (inside == 0 && arriveAt != 0 && now >= arriveAt) {
-    if (++streak >= 2) {
-      inside = 1;
-      streak = 0;
-      uint8_t out[] = {0x21, 0x01, static_cast<uint8_t>(now)};
-      reply(out, sizeof out);
-    }
-  } else {
-    streak = 0;
+  if (zoneSignal[0] == 0 || recentCount < 3) return;
+  Zone now = classify(smooth);
+  if (now == zone) {
+    holds = 0;
+    return;
+  }
+  if (now != candidate) {
+    candidate = now;
+    holds = 0;
+  }
+  if (++holds >= (now == Hall ? 4 : 3)) {
+    holds = 0;
+    moved(now, smooth);
   }
 }
 

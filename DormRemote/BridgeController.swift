@@ -78,23 +78,37 @@ final class BridgeController: NSObject {
 
   // MARK: Presence (Walk in)
 
-  /// The bridge saw you reach your door spot (true) or pass your leaving spot (false), with the signal then.
-  var onPresence: ((_ arrived: Bool, _ rssi: Int) -> Void)?
+  /// The bridge's zone engine saw you arrive (true) or leave (false), with the signal then and how far past the
+  /// boundary it was (dB, a confidence).
+  var onPresence: ((_ arrived: Bool, _ rssi: Int, _ margin: Int) -> Void)?
   /// The bridge connected (true) or dropped (false).
   var onLink: ((Bool) -> Void)?
-  private var spots: (arrive: Int, leave: Int) = (0, 0)
+  /// Room, doorway and hall signals from the guided setup; sent again whenever the bridge reconnects.
+  private var zones: [Int] = [0, 0, 0]
   private var linkReplies: [(Int?) -> Void] = []
+  private var zoneReply: ((Int?) -> Void)?
 
-  /// Tells the bridge where your door and leaving spots are (dBm of its link to the phone); nil turns one off. Sent
-  /// again whenever the bridge reconnects.
-  func setSpots(arrive: Int?, leave: Int?) {
-    spots = (arrive ?? 0, leave ?? 0)
-    sendSpots()
+  /// Teaches the bridge your zones (room, doorway, hall, in dBm), or turns presence off with nil.
+  func setZones(_ signals: [Int]?) {
+    zones = signals ?? [0, 0, 0]
+    sendZones()
   }
 
-  private func sendSpots() {
+  private func sendZones() {
     let byte = { (v: Int) in UInt8(bitPattern: Int8(clamping: v)) }
-    write([0x20, byte(spots.arrive), byte(spots.leave)])
+    write([0x31, byte(zones[0]), byte(zones[1]), byte(zones[2])])
+  }
+
+  /// Measures one zone for setup (0 hall, 1 doorway, 2 room): about four seconds of the bridge's readings, median.
+  func measureZone(_ zone: Int, _ done: @escaping (Int?) -> Void) {
+    guard state == .ready else { return done(nil) }
+    zoneReply = done
+    write([0x30, UInt8(zone)])
+    DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+      guard let self, let waiting = self.zoneReply else { return }
+      self.zoneReply = nil
+      waiting(nil)
+    }
   }
 
   /// The bridge's smoothed reading of its link to this phone, for setting a spot. Nil if it isn't connected.
@@ -217,6 +231,8 @@ extension BridgeController: CBCentralManagerDelegate {
     let waiting = linkReplies
     linkReplies = []
     waiting.forEach { $0(nil) }
+    zoneReply?(nil)
+    zoneReply = nil
     onLink?(false)
     // A pending connect never times out and wakes the app when the bridge is back in range (you, coming home).
     state = .searching
@@ -238,7 +254,7 @@ extension BridgeController: CBPeripheralDelegate {
       connectTimer?.invalidate()
       state = .ready
       note("connected")
-      sendSpots()
+      sendZones()
       onLink?(true)
     }
   }
@@ -255,8 +271,14 @@ extension BridgeController: CBPeripheralDelegate {
       learning = nil
     case 0x21 where bytes.count >= 3:
       let rssi = Int(Int8(bitPattern: bytes[2]))
-      note(bytes[1] == 1 ? "you reached your door (\(rssi) dBm)" : "you passed your leaving spot (\(rssi) dBm)")
-      onPresence?(bytes[1] == 1, rssi)
+      let margin = bytes.count >= 4 ? Int(bytes[3]) : 0
+      note(bytes[1] == 1 ? "you came in (\(rssi) dBm, \(margin) dB past the door)" : "you left (\(rssi) dBm, \(margin) dB past the door)")
+      onPresence?(bytes[1] == 1, rssi, margin)
+    case 0x30 where bytes.count >= 3:
+      let rssi = Int(Int8(bitPattern: bytes[2]))
+      let waiting = zoneReply
+      zoneReply = nil
+      waiting?(rssi == 0 ? nil : rssi)
     case 0x22 where bytes.count >= 2:
       let rssi = Int(Int8(bitPattern: bytes[1]))
       let waiting = linkReplies

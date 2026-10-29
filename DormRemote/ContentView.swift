@@ -2112,6 +2112,7 @@ private struct WalkInSection: View {
             .foregroundStyle(Ink.dim)
         }
         sensors(walkIn)
+        doorwaySection(walkIn)
 
         Toggle(isOn: Binding(get: { walkIn.enabled }, set: { walkIn.enabled = $0 })) {
           Text("Light up when I get home").font(.body.weight(.semibold))
@@ -2154,7 +2155,6 @@ private struct WalkInSection: View {
             }
           }
           .frame(minHeight: 44)
-          if walkIn.offWhenLeaving { leaveSection(walkIn) }
 
           Button { walkIn.tryNow() } label: {
             Label("Try it now", systemImage: "play.fill")
@@ -2204,7 +2204,7 @@ private struct WalkInSection: View {
                : walkIn.nearBeacon == false ? "Out of range" : "Not seen yet. Plug in the IR bridge (firmware from Oct 29 or later)",
              good: walkIn.nearBeacon == true)
       sensor("av.remote", "IR bridge",
-             room.bridge.state == .ready ? (walkIn.doorSpot != nil || walkIn.leaveSpot != nil ? "Watching your spots" : "Connected") : "Not connected",
+             room.bridge.state == .ready ? (walkIn.zones != nil ? "Watching your doorway" : "Connected") : "Not connected",
              good: room.bridge.state == .ready)
       sensor("mappin.circle", "Area around home",
              !walkIn.useLocation ? "Off" : !walkIn.locationAlways ? "Needs location set to Always" : walkIn.home == nil ? "Not set" : "Set (150 m)",
@@ -2235,37 +2235,50 @@ private struct WalkInSection: View {
     .accessibilityElement(children: .combine)
   }
 
-  /// Walk out's spot: where on the way out everything turns off.
-  private func leaveSection(_ walkIn: WalkIn) -> some View {
-    VStack(alignment: .leading, spacing: 12) {
-      Text("Leaving spot").font(.headline)
-      Text(walkIn.leaveSpot == nil
-           ? "Not set: the lights go off when iOS notices you've left your room, about 30 s later, and the strips only if they're still in range then. Walk out to where you want them off (outside your door, or down the hall while your IR bridge still reaches you) and tap Set leaving spot."
-           : "Set (\(walkIn.leaveSpot!) dBm). Your IR bridge watches your phone's signal; when you pass this spot it wakes Dorm Remote and everything goes off together.")
+  /// Guided setup for the bridge's zones: three readings, room, doorway, hall. Nobody has to know what dBm means.
+  private func doorwaySection(_ walkIn: WalkIn) -> some View {
+    let steps = ["Stand in your room, where you usually are", "Stand in your doorway", "Step outside and close the door"]
+    return VStack(alignment: .leading, spacing: 12) {
+      Text("Your doorway").font(.headline)
+      Text(walkIn.zones != nil
+           ? "Set up. Your IR bridge tells room from doorway from hall: going out turns everything off together, coming back through the door turns it on. Standing in the doorway does nothing."
+           : "Three quick readings teach Dorm Remote where your room ends. Your IR bridge does the measuring.")
         .font(.subheadline)
         .foregroundStyle(Ink.dim)
         .fixedSize(horizontal: false, vertical: true)
-      HStack(spacing: 12) {
-        Button { walkIn.setLeaveSpot() } label: {
-          HStack(spacing: 8) {
-            if walkIn.measuringLeave { ProgressView() }
-            Text(walkIn.measuringLeave ? "Measuring…" : walkIn.leaveSpot == nil ? "Set leaving spot" : "Set it again")
+      if walkIn.zones == nil {
+        ForEach(0..<3, id: \.self) { i in
+          let done = walkIn.zoneReadings[i] != nil
+          let next = !done && (i == 0 || walkIn.zoneReadings[i - 1] != nil)
+          HStack(spacing: 12) {
+            Image(systemName: done ? "checkmark" : "\(i + 1).circle")
+              .font(.body.weight(.semibold))
+              .frame(width: 28)
+              .foregroundStyle(done ? Ink.text : Ink.dim)
+            Text(steps[i]).font(.subheadline).foregroundStyle(next || done ? Ink.text : Ink.dim)
+            Spacer()
+            if walkIn.measuringZone == i {
+              ProgressView()
+            } else if next {
+              Button("Measure") { walkIn.measureZone(i) }
+                .font(.subheadline.weight(.semibold))
+                .frame(minHeight: 44)
+                .disabled(walkIn.measuringZone != nil)
+            }
           }
-          .font(.body.weight(.semibold))
-          .frame(maxWidth: .infinity, minHeight: 52)
-          .background(Capsule().fill(Ink.raised))
+          .frame(minHeight: 44)
         }
-        .buttonStyle(Press())
-        .disabled(walkIn.measuringLeave)
-        if walkIn.leaveSpot != nil {
-          Button("Clear") { walkIn.clearLeaveSpot() }
-            .frame(minWidth: 64, minHeight: 52)
-        }
+      } else {
+        Button("Set up again") { walkIn.redoZones() }
+          .font(.subheadline.weight(.semibold))
+          .frame(minHeight: 44)
       }
-      if let error = walkIn.leaveError {
+      if let error = walkIn.zoneError {
         Text(error).font(.footnote).foregroundStyle(Ink.bad).fixedSize(horizontal: false, vertical: true)
       }
     }
+    .padding(16)
+    .card()
   }
 
   private func spotSection(_ walkIn: WalkIn) -> some View {
