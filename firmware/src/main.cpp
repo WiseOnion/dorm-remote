@@ -12,6 +12,15 @@
 //   00 status                01 = sent, 02 = unsupported protocol
 //   10 type bits v0..v7      learned code, same layout as command 02
 //
+// Presence, the way ESP32 room sensors (ESPresense, Bermuda) do it: the board watches your phone's signal on its
+// own connection and tells the phone when you pass a spot. A notification from a connected accessory wakes the app
+// even in the background, so the app doesn't have to stay awake to notice you leave.
+//   20 arrive leave          set the spots, in dBm (signed byte; 0 = off)
+//   22                       read the link's signal now
+// Replies:
+//   21 in rssi               01 = reached the door spot coming in, 00 = passed the leaving spot going out
+//   22 rssi                  the link's signal now, smoothed (0 = no reading yet)
+//
 // Room beacon: every other second the board advertises as an iBeacon (UUID D0A1E7B2-6F2C-4C8B-9E31-5B7A0C1D2E3F,
 // major 1, minor 1), in the standard form (non-connectable, no scan response) and at -12 dBm, so iOS reports you
 // "in range" near your door rather than down the hall. iOS relaunches an app for beacon region crossings even after it was swiped away, so the
@@ -47,9 +56,27 @@ static NimBLEAdvertisementData beaconFrame, bridgeFrame;
 static bool showingBeacon = false;
 static uint32_t lastSwap = 0;
 
+// Presence state for the phone's connection.
+static const uint16_t kNoPhone = 0xFFFF;
+static volatile uint16_t phone = kNoPhone;
+static int8_t arriveAt = 0, leaveAt = 0;
+static float smooth = 0;
+static int8_t inside = -1;  // -1 not decided yet, 0 out, 1 in
+static uint8_t streak = 0;
+static uint32_t lastPresence = 0;
+
 // Advertising stops when the phone connects; keep it going so the beacon stays visible while you're home.
 class KeepAdvertising : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer *s, NimBLEConnInfo &info) override { NimBLEDevice::startAdvertising(); }
+  void onConnect(NimBLEServer *s, NimBLEConnInfo &info) override {
+    phone = info.getConnHandle();
+    smooth = 0;
+    inside = -1;
+    streak = 0;
+    NimBLEDevice::startAdvertising();
+  }
+  void onDisconnect(NimBLEServer *s, NimBLEConnInfo &info, int reason) override {
+    if (info.getConnHandle() == phone) phone = kNoPhone;
+  }
 };
 
 static void reply(const uint8_t *data, size_t len) {
@@ -94,6 +121,18 @@ class Commands : public NimBLECharacteristicCallbacks {
         learning = true;
         irrecv.resume();
         break;
+      case 0x20:
+        if (v.size() < 3) return;
+        arriveAt = static_cast<int8_t>(b[1]);
+        leaveAt = static_cast<int8_t>(b[2]);
+        inside = -1;
+        streak = 0;
+        break;
+      case 0x22: {
+        uint8_t out[] = {0x22, static_cast<uint8_t>(static_cast<int8_t>(lroundf(smooth)))};
+        reply(out, sizeof out);
+        break;
+      }
     }
   }
 };
@@ -128,7 +167,45 @@ void setup() {
   Serial.println("DormBridge ready");
 }
 
+// Twice a second: smooth the phone's signal, and report crossing a spot (two readings in a row coming in, three going
+// out, so one bad reading doesn't count).
+static void watchPresence() {
+  if (phone == kNoPhone || millis() - lastPresence < 500) return;
+  lastPresence = millis();
+  int8_t rssi;
+  if (ble_gap_conn_rssi(phone, &rssi) != 0 || rssi == 127) return;
+  smooth = smooth == 0 ? rssi : smooth * 0.7f + rssi * 0.3f;
+  int8_t now = static_cast<int8_t>(lroundf(smooth));
+  if (inside == -1) {
+    // First reading on this connection: already past the door spot counts as arriving.
+    inside = (arriveAt == 0 || now >= arriveAt) ? 1 : 0;
+    if (arriveAt != 0 && inside == 1) {
+      uint8_t out[] = {0x21, 0x01, static_cast<uint8_t>(now)};
+      reply(out, sizeof out);
+    }
+    return;
+  }
+  if (inside == 1 && leaveAt != 0 && now <= leaveAt) {
+    if (++streak >= 3) {
+      inside = 0;
+      streak = 0;
+      uint8_t out[] = {0x21, 0x00, static_cast<uint8_t>(now)};
+      reply(out, sizeof out);
+    }
+  } else if (inside == 0 && arriveAt != 0 && now >= arriveAt) {
+    if (++streak >= 2) {
+      inside = 1;
+      streak = 0;
+      uint8_t out[] = {0x21, 0x01, static_cast<uint8_t>(now)};
+      reply(out, sizeof out);
+    }
+  } else {
+    streak = 0;
+  }
+}
+
 void loop() {
+  watchPresence();
   if (millis() - lastSwap > 1000) {
     lastSwap = millis();
     showingBeacon = !showingBeacon;

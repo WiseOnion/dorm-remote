@@ -67,24 +67,26 @@ final class WalkIn: NSObject {
       updateWatch()
     }
   }
-  /// The strip signal (dBm) where you want everything off on the way out, and the strip it was measured from. Nil:
-  /// off when iOS notices you've gone instead (the beacon, about 30 s after you leave its range).
+  /// The bridge's signal from your phone (dBm) where everything turns off on the way out. The bridge watches for it
+  /// (firmware/src/main.cpp) and wakes the app. Nil: off when iOS notices you've gone instead (the beacon, about
+  /// 30 s after you leave its range).
   private(set) var leaveSpot = UserDefaults.standard.object(forKey: "walkInLeaveSpot") as? Int {
     didSet {
       UserDefaults.standard.set(leaveSpot, forKey: "walkInLeaveSpot")
       updateWatch()
     }
   }
-  private var leaveStrip = UserDefaults.standard.string(forKey: "walkInLeaveStrip").flatMap(UUID.init) {
-    didSet { UserDefaults.standard.set(leaveStrip?.uuidString, forKey: "walkInLeaveStrip") }
+  /// The same reading at your door, coming in: the bridge says when you reach it.
+  private(set) var doorSpot = UserDefaults.standard.object(forKey: "walkInDoorSpot") as? Int {
+    didSet {
+      UserDefaults.standard.set(doorSpot, forKey: "walkInDoorSpot")
+      updateWatch()
+    }
   }
   private(set) var measuringLeave = false
   var leaveError: String?
-  /// Reads the strip's signal every 2 s while you're home, to catch you passing your leaving spot.
-  private var watchTimer: Timer?
-  private var belowCount = 0
-  /// Whether it's watching for you to pass your leaving spot right now.
-  var watching: Bool { watchTimer != nil }
+  /// Coming back with a door spot set: wait for the bridge to see you reach it, until then.
+  private var doorWait: Date?
   /// Location: the room beacon and the circle around home. Both need "Always" so iOS can wake the app.
   var useLocation = UserDefaults.standard.bool(forKey: "walkInLocation") {
     didSet {
@@ -160,7 +162,15 @@ final class WalkIn: NSObject {
   private let location = CLLocationManager()
 
   weak var room: Room? {
-    didSet { updateWatch() }
+    didSet {
+      room?.bridge.onPresence = { [weak self] arrived, rssi in
+        MainActor.assumeIsolated { self?.bridgeSaw(arrived: arrived, rssi: rssi) }
+      }
+      room?.bridge.onLink = { [weak self] up in
+        MainActor.assumeIsolated { if !up { self?.bridgeDropped() } }
+      }
+      updateWatch()
+    }
   }
 
   /// When you last opened the app. Opening it reconnects the strips too, and that isn't walking in: without this,
@@ -214,84 +224,73 @@ final class WalkIn: NSObject {
     }
   }
 
-  // MARK: Your leaving spot
+  // MARK: The bridge's spots
 
-  /// Stand where everything should go off on the way out and call this: averages a few readings from the nearest
-  /// connected strip. It has to be somewhere the strips still reach, or there's nothing to compare against.
+  /// Stand where everything should go off on the way out and call this: the bridge measures its link to your phone.
+  /// It has to be somewhere the bridge (and the strips) still reach.
   func setLeaveSpot() {
-    guard let room, let strip = connected.first(where: { s in
-      room.item(Room.stripItemID(s.id)).map { room.roomOf($0) == room.currentRoom } ?? false
-    }) ?? connected.first else {
-      leaveError = "No strip is connected here, so this is past their range. Try a spot a little closer to your room."
-      return
+    measureBridge { [weak self] rssi in
+      guard let self else { return }
+      guard let rssi else {
+        self.leaveError = "Your IR bridge can't hear your phone here, so this is past its range. Try a spot closer to your room."
+        return
+      }
+      self.leaveError = nil
+      self.leaveSpot = rssi
+      self.note("Leaving spot set at \(rssi) dBm.")
     }
-    leaveError = nil
+  }
+
+  func clearLeaveSpot() { leaveSpot = nil }
+
+  /// Six readings over about three seconds, averaged.
+  private func measureBridge(_ done: @escaping (Int?) -> Void) {
+    guard let room, room.bridge.state == .ready else { return done(nil) }
     measuringLeave = true
     var readings: [Int] = []
     func next(_ left: Int) {
-      room.strip.readRSSI(strip.id) { [weak self] rssi in
+      room.bridge.readLinkRSSI { [weak self] rssi in
         MainActor.assumeIsolated {
-          guard let self else { return }
           if let rssi { readings.append(rssi) }
           if left > 1 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { MainActor.assumeIsolated { next(left - 1) } }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { MainActor.assumeIsolated { next(left - 1) } }
             return
           }
-          self.measuringLeave = false
-          guard !readings.isEmpty else {
-            self.leaveError = "Couldn't read the strip's signal. Try again."
-            return
-          }
-          self.leaveStrip = strip.id
-          self.leaveSpot = readings.reduce(0, +) / readings.count
-          self.note("Leaving spot set at \(self.leaveSpot!) dBm.")
+          self?.measuringLeave = false
+          done(readings.isEmpty ? nil : readings.reduce(0, +) / readings.count)
         }
       }
     }
     next(6)
   }
 
-  func clearLeaveSpot() { leaveSpot = nil }
-
-  /// While you're home with a leaving spot set, the app stays awake in the background on low-power location (it can't
-  /// read Bluetooth signal otherwise) and reads the strip every 2 s. Two readings at or past the spot in a row mean
-  /// you've reached it. Stops as soon as you're away.
+  /// Keeps the bridge's spots in step with the settings.
   private func updateWatch() {
-    let should = enabled && offWhenLeaving && leaveSpot != nil && awaySince == nil && locationAlways && room != nil
-    if should, watchTimer == nil {
-      belowCount = 0
-      watchTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-        MainActor.assumeIsolated { self?.checkLeave() }
-      }
-      updateLocationUpdates()
-    } else if !should, watchTimer != nil {
-      watchTimer?.invalidate()
-      watchTimer = nil
-      updateLocationUpdates()
+    room?.bridge.setSpots(arrive: enabled ? doorSpot : nil, leave: enabled && offWhenLeaving ? leaveSpot : nil)
+  }
+
+  private func bridgeSaw(arrived: Bool, rssi: Int) {
+    guard enabled else { return }
+    if arrived {
+      guard let since = awaySince else { return }
+      doorWait = nil
+      comeBack(since: since, via: "You reached your door (\(rssi) dBm)", strip: nil, atDoor: true)
+    } else if awaySince == nil {
+      left("You passed your leaving spot (\(rssi) dBm).")
     }
   }
 
-  private func checkLeave() {
-    guard let room, let spot = leaveSpot else { return }
-    let id = leaveStrip.flatMap { id in connected.first { $0.id == id }?.id } ?? connected.first?.id
-    // No strip connected: either you're already out of range (the drop is handled as leaving) or it's reconnecting.
-    guard let id else { return }
-    room.strip.readRSSI(id) { [weak self] rssi in
-      MainActor.assumeIsolated {
-        guard let self, let rssi, self.awaySince == nil else { return }
-        self.belowCount = rssi <= spot ? self.belowCount + 1 : 0
-        if self.belowCount >= 2 {
-          self.belowCount = 0
-          self.left("You passed your leaving spot (\(rssi) dBm).")
-        }
-      }
-    }
+  /// The bridge lost your phone: you're past its range, unless the beacon still hears you (a blip).
+  private func bridgeDropped() {
+    guard enabled, awaySince == nil else { return }
+    if useLocation, nearBeacon == true { return }
+    left("Your IR bridge lost your phone.")
   }
 
   /// Location updates keep the app running in the background, for ranging while you walk in or watching while you're
   /// home. Lowest accuracy: it's the running that matters, not the fix.
   private func updateLocationUpdates() {
-    if rangeTarget != nil || watchTimer != nil {
+    if rangeTarget != nil {
       location.allowsBackgroundLocationUpdates = true
       location.pausesLocationUpdatesAutomatically = false
       location.showsBackgroundLocationIndicator = false
@@ -322,8 +321,31 @@ final class WalkIn: NSObject {
     comeBack(since: since, via: "Your room's beacon is in range", strip: nil)
   }
 
-  private func comeBack(since: Date, via: String, strip id: UUID?) {
+  private func comeBack(since: Date, via: String, strip id: UUID?, atDoor: Bool = false) {
+    // Already waiting for the bridge to see you at the door: a strip or the beacon coming back adds nothing.
+    if !atDoor, doorWait != nil { return }
+    // With a door spot on the bridge, wait for the bridge to say you're there, unless it never connects.
+    if !atDoor, doorSpot != nil, let room, Date().timeIntervalSince(since) >= Double(awayMinutes) * 60 {
+      doorWait = Date().addingTimeInterval(Self.spotWait)
+      note("\(via). Waiting for you to reach your door.")
+      beginBackground()
+      Task { [weak self] in await self?.room?.reconnect() }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 20) {
+        MainActor.assumeIsolated {
+          guard self.doorWait != nil, self.awaySince != nil, room.bridge.state != .ready else { return }
+          self.doorWait = nil
+          self.note("The IR bridge didn't connect. Using the strips and beacon instead.")
+          self.comeBack(since: since, via: "Back", strip: id, atDoor: false, skipBridge: true)
+        }
+      }
+      return
+    }
+    comeBack(since: since, via: via, strip: id, atDoor: atDoor, skipBridge: true)
+  }
+
+  private func comeBack(since: Date, via: String, strip id: UUID?, atDoor: Bool, skipBridge: Bool) {
     awaySince = nil
+    doorWait = nil
     guard enabled else { return }
     let minutes = Int(Date().timeIntervalSince(since) / 60)
     if let opened = appOpenedAt, Date().timeIntervalSince(opened) < 30 {
@@ -339,8 +361,12 @@ final class WalkIn: NSObject {
     // The cloud bulb needs a few seconds to load after a relaunch: start now, while you're still walking in.
     Task { [weak self] in await self?.room?.reconnect() }
     let deadline = Date().addingTimeInterval(Self.spotWait)
+    // The bridge already saw you at your door.
+    if atDoor {
+      note("\(via) after \(minutes) min.")
+      arrive(id)
     // The beacon sits in your room, so its signal places you better than a strip's.
-    if let beaconSpot, useLocation {
+    } else if let beaconSpot, useLocation {
       note("\(via) after \(minutes) min. Waiting for you to reach your door.")
       rangeStarted = Date()
       rangeHeard = false
@@ -484,6 +510,11 @@ final class WalkIn: NSObject {
   /// Stand at your door and call this: averages a few readings from the nearest connected strip.
   func setSpot() {
     measureBeacon()
+    measureBridge { [weak self] rssi in
+      guard let self, let rssi else { return }
+      self.doorSpot = rssi
+      self.note("Door spot set on the bridge at \(rssi) dBm.")
+    }
     guard let room, let strip = connected.first(where: { s in
       room.item(Room.stripItemID(s.id)).map { room.roomOf($0) == room.currentRoom } ?? false
     }) ?? connected.first else {
@@ -521,6 +552,7 @@ final class WalkIn: NSObject {
   func clearSpot() {
     spot = nil
     beaconSpot = nil
+    doorSpot = nil
   }
 
   /// Three seconds of beacon readings where you stand. Skipped quietly when location is off or no bridge is near.

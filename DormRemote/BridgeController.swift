@@ -76,6 +76,40 @@ final class BridgeController: NSObject {
   private var writeChar: CBCharacteristic?
   private var connectTimer: Timer?
 
+  // MARK: Presence (Walk in)
+
+  /// The bridge saw you reach your door spot (true) or pass your leaving spot (false), with the signal then.
+  var onPresence: ((_ arrived: Bool, _ rssi: Int) -> Void)?
+  /// The bridge connected (true) or dropped (false).
+  var onLink: ((Bool) -> Void)?
+  private var spots: (arrive: Int, leave: Int) = (0, 0)
+  private var linkReplies: [(Int?) -> Void] = []
+
+  /// Tells the bridge where your door and leaving spots are (dBm of its link to the phone); nil turns one off. Sent
+  /// again whenever the bridge reconnects.
+  func setSpots(arrive: Int?, leave: Int?) {
+    spots = (arrive ?? 0, leave ?? 0)
+    sendSpots()
+  }
+
+  private func sendSpots() {
+    let byte = { (v: Int) in UInt8(bitPattern: Int8(clamping: v)) }
+    write([0x20, byte(spots.arrive), byte(spots.leave)])
+  }
+
+  /// The bridge's smoothed reading of its link to this phone, for setting a spot. Nil if it isn't connected.
+  func readLinkRSSI(_ done: @escaping (Int?) -> Void) {
+    guard state == .ready else { return done(nil) }
+    linkReplies.append(done)
+    write([0x22])
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+      guard let self, !self.linkReplies.isEmpty else { return }
+      let waiting = self.linkReplies
+      self.linkReplies = []
+      waiting.forEach { $0(nil) }
+    }
+  }
+
   override init() {
     super.init()
     // Restore identifier: iOS keeps pending connects and relaunches the app for them (Apple TN3115).
@@ -180,7 +214,13 @@ extension BridgeController: CBCentralManagerDelegate {
     writeChar = nil
     learning = nil
     note("disconnected")
-    scan()
+    let waiting = linkReplies
+    linkReplies = []
+    waiting.forEach { $0(nil) }
+    onLink?(false)
+    // A pending connect never times out and wakes the app when the bridge is back in range (you, coming home).
+    state = .searching
+    central.connect(peripheral)
   }
 }
 
@@ -198,14 +238,32 @@ extension BridgeController: CBPeripheralDelegate {
       connectTimer?.invalidate()
       state = .ready
       note("connected")
+      sendSpots()
+      onLink?(true)
     }
   }
 
   func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
-    guard let value = characteristic.value, value.count >= 11, value[value.startIndex] == 0x10, let id = learning else { return }
-    learned[id] = value.dropFirst().prefix(10)
-    UserDefaults.standard.set(learned, forKey: "irLearned")
-    note("learned \(id)")
-    learning = nil
+    guard let value = characteristic.value, let kind = value.first else { return }
+    let bytes = [UInt8](value)
+    switch kind {
+    case 0x10:
+      guard bytes.count >= 11, let id = learning else { return }
+      learned[id] = Data(bytes.dropFirst().prefix(10))
+      UserDefaults.standard.set(learned, forKey: "irLearned")
+      note("learned \(id)")
+      learning = nil
+    case 0x21 where bytes.count >= 3:
+      let rssi = Int(Int8(bitPattern: bytes[2]))
+      note(bytes[1] == 1 ? "you reached your door (\(rssi) dBm)" : "you passed your leaving spot (\(rssi) dBm)")
+      onPresence?(bytes[1] == 1, rssi)
+    case 0x22 where bytes.count >= 2:
+      let rssi = Int(Int8(bitPattern: bytes[1]))
+      let waiting = linkReplies
+      linkReplies = []
+      waiting.forEach { $0(rssi == 0 ? nil : rssi) }
+    default:
+      break
+    }
   }
 }

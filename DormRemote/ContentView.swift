@@ -2203,6 +2203,9 @@ private struct WalkInSection: View {
                : walkIn.nearBeacon == true ? (walkIn.beaconRSSI.map { "In range (\($0) dBm)" } ?? "In range")
                : walkIn.nearBeacon == false ? "Out of range" : "Not seen yet. Plug in the IR bridge (firmware from Oct 29 or later)",
              good: walkIn.nearBeacon == true)
+      sensor("av.remote", "IR bridge",
+             room.bridge.state == .ready ? (walkIn.doorSpot != nil || walkIn.leaveSpot != nil ? "Watching your spots" : "Connected") : "Not connected",
+             good: room.bridge.state == .ready)
       sensor("mappin.circle", "Area around home",
              !walkIn.useLocation ? "Off" : !walkIn.locationAlways ? "Needs location set to Always" : walkIn.home == nil ? "Not set" : "Set (150 m)",
              good: walkIn.useLocation && walkIn.locationAlways && walkIn.home != nil)
@@ -2237,10 +2240,8 @@ private struct WalkInSection: View {
     VStack(alignment: .leading, spacing: 12) {
       Text("Leaving spot").font(.headline)
       Text(walkIn.leaveSpot == nil
-           ? "Not set: the lights go off when iOS notices you've left your room, about 30 s later, and the strips only if they're still in range then. Walk out to where you want them off (outside your door, or down the hall while the strips still reach you) and tap Set leaving spot."
-           : walkIn.watching
-             ? "Set (\(walkIn.leaveSpot!) dBm). Watching while you're home: when you pass it, everything goes off together. Dorm Remote stays awake in the background for this, which uses a little battery."
-             : "Set (\(walkIn.leaveSpot!) dBm). Needs Use location, set to Always, to watch for you passing it.")
+           ? "Not set: the lights go off when iOS notices you've left your room, about 30 s later, and the strips only if they're still in range then. Walk out to where you want them off (outside your door, or down the hall while your IR bridge still reaches you) and tap Set leaving spot."
+           : "Set (\(walkIn.leaveSpot!) dBm). Your IR bridge watches your phone's signal; when you pass this spot it wakes Dorm Remote and everything goes off together.")
         .font(.subheadline)
         .foregroundStyle(Ink.dim)
         .fixedSize(horizontal: false, vertical: true)
