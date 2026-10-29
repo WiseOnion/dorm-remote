@@ -7,16 +7,18 @@ import UIKit
 // The lights are the only color: their dots, sliders and a soft glow behind every tab.
 // Layout follows the Hubspace light screen (mode circles, brightness bar, presets, wheel)
 // with DayBetter's patterns and music on top.
+// Each gray has an Increase Contrast variant, as Apple's HIG (Color) asks of custom colors: edges, fills and secondary
+// text get clearly brighter when that setting is on.
 private enum Ink {
   static let bg = Color(hex: 0x07070B)
   static let card = Color(hex: 0x121218)
-  static let raised = Color(hex: 0x1F1F27)
+  static let raised = Color(hex: 0x1F1F27, contrast: 0x2E2E3A)
   /// Card edge: light enough to separate a card from the canvas, quiet enough to disappear.
-  static let line = Color.white.opacity(0.07)
+  static let line = Color(UIColor { $0.accessibilityContrast == .high ? UIColor(white: 1, alpha: 0.24) : UIColor(white: 1, alpha: 0.07) })
   static let text = Color(hex: 0xF5F5F7)
   /// Secondary text: 7.3:1 on cards, 6.4:1 on raised fills (WCAG AA needs 4.5).
-  static let dim = Color(hex: 0xA1A1AA)
-  static let bad = Color(hex: 0xFF6B5E)
+  static let dim = Color(hex: 0xA1A1AA, contrast: 0xD4D4D8)
+  static let bad = Color(hex: 0xFF6B5E, contrast: 0xFF8A80)
 }
 
 /// One set of timings for the whole app, so every screen moves the same way.
@@ -92,7 +94,7 @@ private struct Press: ButtonStyle {
 }
 
 private enum Sheet: Identifiable {
-  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, log, makeScene
+  case light(String), stripSetup, hubSetup, lampSetup, remote(String), addRemote, add, log, makeScene, match
   var id: String {
     switch self {
     case .light(let id): "light-" + id
@@ -104,6 +106,7 @@ private enum Sheet: Identifiable {
     case .add: "add"
     case .log: "log"
     case .makeScene: "makeScene"
+    case .match: "match"
     }
   }
 }
@@ -252,7 +255,7 @@ struct ContentView: View {
     .sheet(item: $sheet) { sheet in
       Group {
         switch sheet {
-        case .light(let id): LightSheet(room: room, id: id)
+        case .light(let id): LightSheet(room: room, id: id) { sheet = .match }
         case .stripSetup: StripSetup(strip: room.strip)
         case .hubSetup: HubSetup(hubspace: room.hubspace)
         case .remote(let id): RemoteSheet(room: room, id: id)
@@ -272,6 +275,7 @@ struct ContentView: View {
         }
         case .log: LogView(lines: room.strip.log + room.hubspace.log + room.bridge.log + room.lamps.log)
         case .makeScene: SceneMaker(room: room)
+        case .match: MatchSheet(room: room)
         }
       }
       .panel()
@@ -687,6 +691,9 @@ private struct SceneMaker: View {
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 24) {
+        // Apple HIG (Sheets): a way out on the leading edge that doesn't save.
+        Button("Cancel") { dismiss() }
+          .frame(minHeight: 44)
         VStack(alignment: .leading, spacing: 8) {
           Text("Pick colors").font(.system(.title, design: .rounded, weight: .bold))
           Text("Choose up to five. Your lights share them out, and Drift moves slowly between them.")
@@ -868,6 +875,7 @@ private struct PowerButton: View {
         .frame(width: 34, height: 34)
         .foregroundStyle(on ? .black : Ink.text)
         .background(Circle().fill(on ? Ink.text : Ink.raised))
+        .frame(width: 44, height: 44)
         .animation(Motion.state, value: on)
     }
     .buttonStyle(Press())
@@ -1076,9 +1084,10 @@ private struct LightSheet: View {
 
   var room: Room
   let id: String
+  /// Opens color matching in place of this sheet (Apple HIG: one sheet at a time).
+  var openMatch: () -> Void = {}
   @State private var mode = Mode.color
   @State private var renaming = false
-  @State private var matching = false
   @State private var confirmRemove = false
   @State private var newName = ""
   @Environment(\.dismiss) private var dismiss
@@ -1157,10 +1166,6 @@ private struct LightSheet: View {
       .onAppear {
         let inEffect = room.effectPlaying(on: id) != nil || (!isRoom && item.effect != nil)
         mode = inEffect ? .effects : item.kelvin != nil ? .white : .color
-      }
-      .sheet(isPresented: $matching) {
-        MatchSheet(room: room)
-          .panel()
       }
       .alert("This effect flashes", isPresented: Binding(get: { room.flashWarning }, set: { room.flashWarning = $0 })) {
         Button("Turn on Reduce flashing") {
@@ -1436,7 +1441,7 @@ private struct LightSheet: View {
       .pickerStyle(.menu)
     }
     if item.kind == .strip {
-      Button { matching = true } label: {
+      Button(action: openMatch) {
         Label("Match colors with the lamp", systemImage: "eyedropper.halffull")
           .font(.subheadline.weight(.semibold))
           .frame(maxWidth: .infinity, minHeight: 48)
@@ -2690,7 +2695,7 @@ private struct MapScreen: View {
       }
       Text(light.name).font(.caption2.weight(.medium)).lineLimit(1).fixedSize()
       if !found {
-        Text("placed by hand").font(.system(size: 9)).foregroundStyle(Ink.dim)
+        Text("placed by hand").font(.caption2).foregroundStyle(Ink.dim)
       }
     }
     .padding(5)
@@ -2986,5 +2991,10 @@ private struct LogView: View {
 extension Color {
   init(hex: UInt32) {
     self.init(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+  }
+
+  /// A color that switches to `contrast` when Increase Contrast is on.
+  init(hex: UInt32, contrast: UInt32) {
+    self.init(UIColor { UIColor(Color(hex: $0.accessibilityContrast == .high ? contrast : hex)) })
   }
 }
