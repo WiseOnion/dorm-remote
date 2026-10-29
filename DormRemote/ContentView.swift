@@ -507,7 +507,8 @@ struct ContentView: View {
   /// dark room lit its way.
   private var scenes: some View {
     let groups = sceneGroups
-    let shown = groups.contains(sceneGroup ?? "") ? sceneGroup! : groups[0]
+    // Until you pick a group, open on the first one with scenes in it, not an empty Yours.
+    let shown = groups.contains(sceneGroup ?? "") ? sceneGroup! : groups.first { !moods(in: $0).isEmpty } ?? groups[0]
     let list = moods(in: shown)
     return VStack(alignment: .leading, spacing: 8) {
       ScrollView(.horizontal) {
