@@ -745,7 +745,7 @@ final class Room {
 
   func setBrightness(_ id: String, _ value: Int) {
     cancelSweep()
-    mood = nil
+    // The scene stays selected, like Hue: dimming it is still that scene, and Drift (colors only) keeps going.
     for light in targets(id) { brightness(light, value) }
   }
 
