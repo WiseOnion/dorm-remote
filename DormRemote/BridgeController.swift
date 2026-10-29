@@ -83,6 +83,26 @@ final class BridgeController: NSObject {
   var onPresence: ((_ arrived: Bool, _ rssi: Int, _ margin: Int) -> Void)?
   /// The bridge connected (true) or dropped (false).
   var onLink: ((Bool) -> Void)?
+
+  /// One reading from the bridge's zone engine, streamed in test mode.
+  struct Reading {
+    let time: Date
+    let raw: Int
+    let filtered: Int
+    let smooth: Int
+    /// -1 not decided, 0 hall, 1 doorway, 2 room.
+    let zone: Int
+    let candidate: Int
+    let holds: Int
+    /// -1 not known, 0 away, 1 home.
+    let home: Int
+    /// dB from the nearest boundary.
+    let margin: Int
+  }
+  var onReading: ((Reading) -> Void)?
+
+  /// Test mode: the bridge streams every reading (about three a second) while it's on.
+  func setStreaming(_ on: Bool) { write([0x32, on ? 1 : 0]) }
   /// Room, doorway and hall signals from the guided setup; sent again whenever the bridge reconnects.
   private var zones: [Int] = [0, 0, 0]
   private var linkReplies: [(Int?) -> Void] = []
@@ -274,6 +294,10 @@ extension BridgeController: CBPeripheralDelegate {
       let margin = bytes.count >= 4 ? Int(bytes[3]) : 0
       note(bytes[1] == 1 ? "you came in (\(rssi) dBm, \(margin) dB past the door)" : "you left (\(rssi) dBm, \(margin) dB past the door)")
       onPresence?(bytes[1] == 1, rssi, margin)
+    case 0x23 where bytes.count >= 9:
+      let s = { (i: Int) in Int(Int8(bitPattern: bytes[i])) }
+      onReading?(Reading(time: Date(), raw: s(1), filtered: s(2), smooth: s(3), zone: s(4), candidate: s(5),
+                         holds: Int(bytes[6]), home: s(7), margin: Int(bytes[8])))
     case 0x30 where bytes.count >= 3:
       let rssi = Int(Int8(bitPattern: bytes[2]))
       let waiting = zoneReply

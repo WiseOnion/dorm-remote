@@ -23,10 +23,12 @@
 //   30 zone                  measure a zone for setup (0 hall, 1 doorway, 2 room): about 4 s of readings
 //   31 room door hall        the zones' signals from setup, in dBm (signed bytes); all 0 = off
 //   22                       read the link's signal now
+//   32 on                    test mode: 1 streams every reading (reply 23), 0 stops
 // Replies:
 //   30 zone rssi             the measured zone's median signal (0 = no readings)
 //   21 in rssi margin        01 = you arrived, 00 = you left; margin = dB past the boundary (confidence)
 //   22 rssi                  the link's signal now, smoothed (0 = no reading yet)
+//   23 raw filtered smooth zone candidate holds home margin   one reading, in test mode
 //
 // Room beacon: every other second the board advertises as an iBeacon (UUID D0A1E7B2-6F2C-4C8B-9E31-5B7A0C1D2E3F,
 // major 1, minor 1), in the standard form (non-connectable, no scan response) and at -12 dBm, so iOS reports you
@@ -79,6 +81,7 @@ static int8_t measuringZone = -1;
 static int8_t measured[16];
 static uint8_t measuredCount = 0;
 static uint32_t measureStart = 0;
+static bool streaming = false;
 
 // Advertising stops when the phone connects; keep it going so the beacon stays visible while you're home.
 class KeepAdvertising : public NimBLEServerCallbacks {
@@ -145,6 +148,10 @@ class Commands : public NimBLECharacteristicCallbacks {
         measuringZone = b[1];
         measuredCount = 0;
         measureStart = millis();
+        break;
+      case 0x32:
+        if (v.size() < 2) return;
+        streaming = b[1] == 1;
         break;
       case 0x31:
         if (v.size() < 4) return;
@@ -266,19 +273,30 @@ static void watchPresence() {
     }
     return;
   }
-  if (zoneSignal[0] == 0 || recentCount < 3) return;
-  Zone now = classify(smooth);
-  if (now == zone) {
-    holds = 0;
-    return;
+  if (zoneSignal[0] != 0 && recentCount >= 3) {
+    Zone now = classify(smooth);
+    if (now == zone) {
+      holds = 0;
+    } else {
+      if (now != candidate) {
+        candidate = now;
+        holds = 0;
+      }
+      if (++holds >= (now == Hall ? 4 : 3)) {
+        holds = 0;
+        moved(now, smooth);
+      }
+    }
   }
-  if (now != candidate) {
-    candidate = now;
-    holds = 0;
-  }
-  if (++holds >= (now == Hall ? 4 : 3)) {
-    holds = 0;
-    moved(now, smooth);
+  if (streaming) {
+    // Confidence: how far the signal sits from the nearest boundary.
+    float inside = (zoneSignal[2] + zoneSignal[1]) / 2.0f, outside = (zoneSignal[1] + zoneSignal[0]) / 2.0f;
+    float margin = zoneSignal[0] == 0 ? 0 : fminf(fabsf(smooth - inside), fabsf(smooth - outside));
+    uint8_t out[] = {0x23, static_cast<uint8_t>(rssi), static_cast<uint8_t>(filtered),
+                     static_cast<uint8_t>(static_cast<int8_t>(lroundf(smooth))), static_cast<uint8_t>(zone),
+                     static_cast<uint8_t>(candidate), holds, static_cast<uint8_t>(home),
+                     static_cast<uint8_t>(constrain(static_cast<int>(lroundf(margin)), 0, 127))};
+    reply(out, sizeof out);
   }
 }
 

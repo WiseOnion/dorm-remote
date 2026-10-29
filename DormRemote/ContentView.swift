@@ -2156,6 +2156,17 @@ private struct WalkInSection: View {
           }
           .frame(minHeight: 44)
 
+          NavigationLink {
+            WalkInTest(room: room)
+          } label: {
+            Label("Test mode", systemImage: "waveform.path.ecg")
+              .font(.body.weight(.semibold))
+              .frame(maxWidth: .infinity, minHeight: 52)
+              .background(Capsule().fill(Ink.raised))
+          }
+          .buttonStyle(Press())
+          .disabled(room.bridge.state != .ready || walkIn.zones == nil)
+
           Button { walkIn.tryNow() } label: {
             Label("Try it now", systemImage: "play.fill")
               .font(.body.weight(.semibold))
@@ -2235,7 +2246,183 @@ private struct WalkInSection: View {
     .accessibilityElement(children: .combine)
   }
 
-  /// Guided setup for the bridge's zones: three readings, room, doorway, hall. Nobody has to know what dBm means.
+  /// Walk in's test mode: what the bridge sees, live, and a log of every decision, while you walk the test scenarios.
+/// Keeps logging with the phone locked (the bridge's readings wake the app). Copy the log to send it.
+private struct WalkInTest: View {
+  var room: Room
+  @State private var readings: [BridgeController.Reading] = []
+  @State private var log: [String] = []
+  @State private var started = Date()
+  @State private var results: [Int: Bool] = [:]
+  @State private var copied = false
+
+  private static let scenarios: [(String, String)] = [
+    ("Sit in the middle of the room", "Room. Nothing fires."),
+    ("Sit beside the door", "Room. Nothing fires."),
+    ("Stand in the doorway", "Doorway. Nothing fires."),
+    ("Open the door without leaving", "Room or doorway. Nothing fires."),
+    ("Step one foot outside", "Doorway, maybe hall. Walk out only if it reaches the hall."),
+    ("Walk 5 ft down the hall", "Hall. Walk out fires once."),
+    ("Walk back toward the room", "Doorway. Walk in fires once (after 20 s away)."),
+    ("Stand outside for 20 s", "Hall. Nothing more fires."),
+    ("Come back in quickly", "Room. Walk in fires once."),
+    ("Do it all with the phone locked", "Same as above; the log keeps going."),
+  ]
+
+  var body: some View {
+    let last = readings.last
+    let walkIn = room.walkIn
+    List {
+      Section {
+        VStack(alignment: .leading, spacing: 8) {
+          HStack(alignment: .firstTextBaseline) {
+            Text(zoneName(last?.zone ?? -1)).font(.largeTitle.weight(.bold))
+            Spacer()
+            Text(last.map { $0.home == 1 ? "Home" : $0.home == 0 ? "Away" : "Not known" } ?? "Not known")
+              .font(.headline)
+              .foregroundStyle(Ink.dim)
+          }
+          Text(last.map { "\($0.smooth) dBm · \($0.margin) dB from a boundary · raw \($0.raw)" } ?? "Waiting for the bridge…")
+            .font(.subheadline.monospacedDigit())
+            .foregroundStyle(Ink.dim)
+          if let last, last.candidate != last.zone, last.holds > 0 {
+            Text("Moving to \(zoneName(last.candidate))… \(last.holds)")
+              .font(.footnote)
+              .foregroundStyle(Ink.dim)
+          }
+          graph.frame(height: 140).padding(.top, 8)
+        }
+        .padding(.vertical, 8)
+        Toggle("Don't change the lights", isOn: Binding(get: { walkIn.dryRun }, set: { walkIn.dryRun = $0 }))
+      }
+
+      Section {
+        ForEach(Array(Self.scenarios.enumerated()), id: \.offset) { i, s in
+          HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+              Text("\(i + 1). \(s.0)")
+              Text(s.1).font(.footnote).foregroundStyle(Ink.dim)
+            }
+            Spacer()
+            Button { results[i] = results[i] == true ? nil : true } label: {
+              Image(systemName: results[i] == true ? "checkmark.circle.fill" : "checkmark.circle")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Passed")
+            Button { results[i] = results[i] == false ? nil : false } label: {
+              Image(systemName: results[i] == false ? "xmark.circle.fill" : "xmark.circle")
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Failed")
+          }
+          .font(.body)
+        }
+      } header: { SectionTitle("Scenarios") }
+
+      Section {
+        let events = walkIn.events.filter { $0.time >= started }.map { "\(stamp($0.time)) \($0.text)" }
+        ForEach(Array((log + events).sorted().reversed().prefix(60).enumerated()), id: \.offset) { _, line in
+          Text(line).font(.footnote.monospaced())
+        }
+      } header: { SectionTitle("Log") }
+    }
+    .listStyle(.insetGrouped)
+    .scrollContentBackground(.hidden)
+    .background(Ink.bg)
+    .navigationTitle("Test mode")
+    .navigationBarTitleDisplayMode(.inline)
+    .toolbar {
+      ToolbarItem(placement: .topBarTrailing) {
+        Button(copied ? "Copied" : "Copy log") { copy() }
+      }
+    }
+    .onAppear {
+      started = Date()
+      room.bridge.onReading = { reading in
+        MainActor.assumeIsolated { take(reading) }
+      }
+      room.bridge.setStreaming(true)
+      log.append("\(stamp(Date())) Test started. Zones: room \(walkIn.zones?[0] ?? 0), doorway \(walkIn.zones?[1] ?? 0), hall \(walkIn.zones?[2] ?? 0) dBm")
+    }
+    .onDisappear {
+      room.bridge.setStreaming(false)
+      room.bridge.onReading = nil
+      walkIn.dryRun = false
+    }
+    .onChange(of: room.bridge.state) { _, state in
+      log.append("\(stamp(Date())) Bridge \(state == .ready ? "connected" : "disconnected")")
+      if state == .ready { room.bridge.setStreaming(true) }
+    }
+  }
+
+  private func take(_ r: BridgeController.Reading) {
+    if let prev = readings.last {
+      if prev.zone != r.zone {
+        log.append("\(stamp(r.time)) \(zoneName(prev.zone)) → \(zoneName(r.zone)) at \(r.smooth) dBm, \(r.margin) dB margin")
+      }
+      if prev.home != r.home {
+        log.append("\(stamp(r.time)) Now \(r.home == 1 ? "home" : "away")")
+      }
+    }
+    readings.append(r)
+    // Two minutes at three a second.
+    if readings.count > 360 { readings.removeFirst(readings.count - 360) }
+  }
+
+  /// The smoothed signal over the last two minutes, with the doorway's two boundaries.
+  private var graph: some View {
+    Canvas { ctx, size in
+      let values = readings.map(\.smooth)
+      guard let zones = room.walkIn.zones, values.count > 1 else { return }
+      let lo = Double(min(values.min() ?? -90, zones[2]) - 5), hi = Double(max(values.max() ?? -30, zones[0]) + 5)
+      let y = { (v: Double) in size.height * (1 - (v - lo) / (hi - lo)) }
+      for boundary in [Double(zones[0] + zones[1]) / 2, Double(zones[1] + zones[2]) / 2] {
+        var line = Path()
+        line.move(to: CGPoint(x: 0, y: y(boundary)))
+        line.addLine(to: CGPoint(x: size.width, y: y(boundary)))
+        ctx.stroke(line, with: .color(Ink.line), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+      }
+      var path = Path()
+      for (i, v) in values.enumerated() {
+        let p = CGPoint(x: size.width * Double(i) / Double(max(1, values.count - 1)), y: y(Double(v)))
+        if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+      }
+      ctx.stroke(path, with: .color(Ink.text), lineWidth: 2)
+    }
+    .accessibilityLabel("Signal over the last two minutes")
+  }
+
+  private func zoneName(_ z: Int) -> String {
+    switch z {
+    case 2: "Room"
+    case 1: "Doorway"
+    case 0: "Hall"
+    default: "Unknown"
+    }
+  }
+
+  private func stamp(_ d: Date) -> String {
+    d.formatted(.dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits).second(.twoDigits))
+  }
+
+  private func copy() {
+    var lines = ["Dorm Remote Walk in test, \(started.formatted())"]
+    lines += Self.scenarios.enumerated().map { i, s in "\(results[i].map { $0 ? "PASS" : "FAIL" } ?? "----") \(i + 1). \(s.0)" }
+    lines.append("")
+    let events = room.walkIn.events.filter { $0.time >= started }.map { "\(stamp($0.time)) \($0.text)" }
+    lines += (log + events).sorted()
+    lines.append("")
+    lines.append("time,raw,filtered,smooth,zone,candidate,holds,home,margin")
+    lines += readings.map { r in
+      "\(stamp(r.time)),\(r.raw),\(r.filtered),\(r.smooth),\(r.zone),\(r.candidate),\(r.holds),\(r.home),\(r.margin)"
+    }
+    UIPasteboard.general.string = lines.joined(separator: "\n")
+    copied = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+  }
+}
+
+/// Guided setup for the bridge's zones: three readings, room, doorway, hall. Nobody has to know what dBm means.
   private func doorwaySection(_ walkIn: WalkIn) -> some View {
     let steps = ["Stand in your room, where you usually are", "Stand in your doorway", "Step outside and close the door"]
     return VStack(alignment: .leading, spacing: 12) {

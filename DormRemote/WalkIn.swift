@@ -78,6 +78,8 @@ final class WalkIn: NSObject {
   /// Setup in progress: each zone's reading as it's measured (room, doorway, hall), and which one is being measured.
   private(set) var zoneReadings: [Int?] = [nil, nil, nil]
   private(set) var measuringZone: Int?
+  /// Test mode's dry run: the bridge's events are logged but the lights don't change.
+  var dryRun = false
   var zoneError: String?
   /// Coming back with a door spot set: wait for the bridge to see you reach it, until then.
   private var doorWait: Date?
@@ -272,6 +274,10 @@ final class WalkIn: NSObject {
 
   private func bridgeSaw(arrived: Bool, rssi: Int, margin: Int) {
     guard enabled else { return }
+    if dryRun {
+      note(arrived ? "Dry run: Walk in would fire (\(margin) dB past the door)." : "Dry run: Walk out would fire (\(margin) dB past the door).")
+      return
+    }
     if arrived {
       guard let since = awaySince else { return }
       doorWait = nil
