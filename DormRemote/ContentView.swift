@@ -255,7 +255,7 @@ struct ContentView: View {
     .sheet(item: $sheet) { sheet in
       Group {
         switch sheet {
-        case .light(let id): LightSheet(room: room, id: id) { sheet = .match }
+        case .light(let id): LightSheet(room: room, id: id) { self.sheet = .match }
         case .stripSetup: StripSetup(strip: room.strip)
         case .hubSetup: HubSetup(hubspace: room.hubspace)
         case .remote(let id): RemoteSheet(room: room, id: id)
