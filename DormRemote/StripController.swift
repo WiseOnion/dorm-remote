@@ -153,6 +153,8 @@ final class Strip: Identifiable {
   /// Waits on the strip's first reply, then on the unlock.
   @ObservationIgnored fileprivate var handshakeTimer: Timer?
   @ObservationIgnored fileprivate var retryTimer: Timer?
+  /// The last failed handshake, so a strip that keeps refusing doesn't loop connect-fail in the background.
+  @ObservationIgnored fileprivate var lastFail: Date?
   @ObservationIgnored fileprivate var unlocking = false
 
   // What the last connection learned, so the next one is quicker: discover only this service, and go straight to
@@ -347,10 +349,12 @@ final class StripController: NSObject {
     guard let p = strip.peripheral else { return }
     central.cancelPeripheralConnection(p)
     guard adding !== strip else { return }
+    let again = strip.lastFail.map { Date().timeIntervalSince($0) < 30 } ?? false
+    strip.lastFail = Date()
     // Re-arm at once, not on a timer: iOS freezes timers while the app is in the background, and this is exactly
     // what happens when you walk back in and the strip half-connects at the edge of range. A pending connect costs
     // nothing and never times out (Apple's connect(_:options:) docs), so iOS keeps waiting for the strip by itself.
-    if Self.inBackground {
+    if Self.inBackground, !again {
       central.connect(p)
     } else {
       retry(strip, p, after: 15)

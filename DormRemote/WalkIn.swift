@@ -115,6 +115,11 @@ final class WalkIn: NSObject {
   private var arrivedAt: Date?
   /// While walking in with a beacon spot set: the signal to reach and when to give up.
   private var rangeTarget: (spot: Int, until: Date)?
+  /// When ranging for arrival started, whether the beacon has been heard since, and the strip that brought you in.
+  /// A bridge that's unplugged or out of power is never heard, and Walk in then falls back to the strips.
+  private var rangeStarted = Date.distantPast
+  private var rangeHeard = false
+  private var rangeStrip: UUID?
   /// Readings collected by Set my spot.
   private var spotReadings: [Int]?
   /// Lights already welcomed this time, so a late one is lit once and a light you switch off stays off.
@@ -198,6 +203,9 @@ final class WalkIn: NSObject {
     // The beacon sits in your room, so its signal places you better than a strip's.
     if let beaconSpot, useLocation {
       note("\(via) after \(minutes) min. Waiting for you to reach your door.")
+      rangeStarted = Date()
+      rangeHeard = false
+      rangeStrip = id
       startRanging(until: deadline, spot: beaconSpot)
     } else if let id, let spot {
       note("\(via) after \(minutes) min. Waiting for you to reach your spot.")
@@ -289,6 +297,19 @@ final class WalkIn: NSObject {
     if rssi != nil { nearBeacon = true }
     if spotReadings != nil, let rssi { spotReadings?.append(rssi) }
     guard let target = rangeTarget else { return }
+    if rssi != nil { rangeHeard = true }
+    // 15 s without a single beacon reading: the bridge isn't there. Use the strips instead of waiting in the dark.
+    if !rangeHeard, Date().timeIntervalSince(rangeStarted) > 15 {
+      stopRanging()
+      if let id = rangeStrip, let spot {
+        note("No beacon heard (is the bridge plugged in?). Using your strips instead.")
+        waitForSpot(id, spot, until: target.until)
+      } else {
+        note("No beacon heard (is the bridge plugged in?). Lighting up anyway.")
+        arrive(rangeStrip)
+      }
+      return
+    }
     if let rssi, rssi >= target.spot {
       stopRanging()
       arrive(nil)
@@ -313,7 +334,9 @@ final class WalkIn: NSObject {
     guard let room, let strip = connected.first(where: { s in
       room.item(Room.stripItemID(s.id)).map { room.roomOf($0) == room.currentRoom } ?? false
     }) ?? connected.first else {
-      spotError = "No strip is connected right now. Step a little closer and try again."
+      spotError = useLocation
+        ? "No strip is connected, so only the beacon was measured. That's enough if the bridge is plugged in."
+        : "No strip is connected right now. Step a little closer and try again."
       return
     }
     spotError = nil
