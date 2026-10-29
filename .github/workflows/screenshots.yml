@@ -56,11 +56,14 @@ jobs:
           mkdir -p shots
           for mode in dark light; do
             xcrun simctl ui "$SIMULATOR_UDID" appearance $mode
-            for tab in room map automations settings; do
+            for shot in room room-scenes map automations settings; do
+              tab=${shot%%-*}
+              scroll=$([ "$shot" = room-scenes ] && echo scenes || echo none)
               xcrun simctl terminate "$SIMULATOR_UDID" "$BID" 2>/dev/null || true
-              xcrun simctl launch "$SIMULATOR_UDID" "$BID" -demo -tab $tab -walkIn YES -selectedRoom Bedroom
-              sleep 7
-              xcrun simctl io "$SIMULATOR_UDID" screenshot "shots/$tab-$mode.png"
+              sleep 1
+              xcrun simctl launch "$SIMULATOR_UDID" "$BID" -demo -tab $tab -scroll $scroll -walkIn YES -selectedRoom Bedroom
+              sleep 9
+              xcrun simctl io "$SIMULATOR_UDID" screenshot "shots/$shot-$mode.png"
             done
           done
           ls -la shots
