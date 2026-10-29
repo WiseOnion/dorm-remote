@@ -49,6 +49,7 @@ final class WalkIn: NSObject {
     didSet {
       UserDefaults.standard.set(enabled, forKey: "walkIn")
       updateGeofence()
+      updateWatch()
     }
   }
   /// The scene to play; nil turns the lights on the way they were.
@@ -59,10 +60,31 @@ final class WalkIn: NSObject {
   var awayMinutes = UserDefaults.standard.object(forKey: "walkInAwayMinutes") as? Int ?? 10 {
     didSet { UserDefaults.standard.set(awayMinutes, forKey: "walkInAwayMinutes") }
   }
-  /// When you leave, turn off the lights the app can still reach (the cloud bulb).
+  /// Walk out: when you leave, every light turns off at the same moment.
   var offWhenLeaving = UserDefaults.standard.bool(forKey: "walkInOffWhenLeaving") {
-    didSet { UserDefaults.standard.set(offWhenLeaving, forKey: "walkInOffWhenLeaving") }
+    didSet {
+      UserDefaults.standard.set(offWhenLeaving, forKey: "walkInOffWhenLeaving")
+      updateWatch()
+    }
   }
+  /// The strip signal (dBm) where you want everything off on the way out, and the strip it was measured from. Nil:
+  /// off when iOS notices you've gone instead (the beacon, about 30 s after you leave its range).
+  private(set) var leaveSpot = UserDefaults.standard.object(forKey: "walkInLeaveSpot") as? Int {
+    didSet {
+      UserDefaults.standard.set(leaveSpot, forKey: "walkInLeaveSpot")
+      updateWatch()
+    }
+  }
+  private var leaveStrip = UserDefaults.standard.string(forKey: "walkInLeaveStrip").flatMap(UUID.init) {
+    didSet { UserDefaults.standard.set(leaveStrip?.uuidString, forKey: "walkInLeaveStrip") }
+  }
+  private(set) var measuringLeave = false
+  var leaveError: String?
+  /// Reads the strip's signal every 2 s while you're home, to catch you passing your leaving spot.
+  private var watchTimer: Timer?
+  private var belowCount = 0
+  /// Whether it's watching for you to pass your leaving spot right now.
+  var watching: Bool { watchTimer != nil }
   /// Location: the room beacon and the circle around home. Both need "Always" so iOS can wake the app.
   var useLocation = UserDefaults.standard.bool(forKey: "walkInLocation") {
     didSet {
@@ -137,7 +159,9 @@ final class WalkIn: NSObject {
   private var background: UIBackgroundTaskIdentifier = .invalid
   private let location = CLLocationManager()
 
-  weak var room: Room?
+  weak var room: Room? {
+    didSet { updateWatch() }
+  }
 
   /// When you last opened the app. Opening it reconnects the strips too, and that isn't walking in: without this,
   /// opening the app hours after getting home (if iOS didn't wake it on the way in) would turn the lights on.
@@ -170,10 +194,112 @@ final class WalkIn: NSObject {
   private func left(_ why: String) {
     awaySince = Date()
     arrivedAt = nil
+    updateWatch()
     guard enabled else { return }
     note("Left. " + why)
-    if offWhenLeaving, let off = room?.leaveOff(), off > 0 {
-      note(off == 1 ? "Turned off the smart bulb." : "Turned off \(off) smart bulbs.")
+    guard offWhenLeaving, let room else { return }
+    beginBackground()
+    // After a relaunch the strips are still reconnecting; they get turned off as they come back, if still in range.
+    room.strip.reconnectNow()
+    let off = room.leaveOff()
+    note(off == 0 ? "Nothing was on." : off == 1 ? "Turned off 1 light." : "Turned off \(off) lights together.")
+    Task { [weak self] in
+      for wait in [3.0, 3, 4] {
+        try? await Task.sleep(for: .seconds(wait))
+        guard let self, self.awaySince != nil else { return }
+        let more = room.leaveOff()
+        if more > 0 { self.note(more == 1 ? "1 more light turned off." : "\(more) more lights turned off.") }
+      }
+      self?.endBackground()
+    }
+  }
+
+  // MARK: Your leaving spot
+
+  /// Stand where everything should go off on the way out and call this: averages a few readings from the nearest
+  /// connected strip. It has to be somewhere the strips still reach, or there's nothing to compare against.
+  func setLeaveSpot() {
+    guard let room, let strip = connected.first(where: { s in
+      room.item(Room.stripItemID(s.id)).map { room.roomOf($0) == room.currentRoom } ?? false
+    }) ?? connected.first else {
+      leaveError = "No strip is connected here, so this is past their range. Try a spot a little closer to your room."
+      return
+    }
+    leaveError = nil
+    measuringLeave = true
+    var readings: [Int] = []
+    func next(_ left: Int) {
+      room.strip.readRSSI(strip.id) { [weak self] rssi in
+        MainActor.assumeIsolated {
+          guard let self else { return }
+          if let rssi { readings.append(rssi) }
+          if left > 1 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { MainActor.assumeIsolated { next(left - 1) } }
+            return
+          }
+          self.measuringLeave = false
+          guard !readings.isEmpty else {
+            self.leaveError = "Couldn't read the strip's signal. Try again."
+            return
+          }
+          self.leaveStrip = strip.id
+          self.leaveSpot = readings.reduce(0, +) / readings.count
+          self.note("Leaving spot set at \(self.leaveSpot!) dBm.")
+        }
+      }
+    }
+    next(6)
+  }
+
+  func clearLeaveSpot() { leaveSpot = nil }
+
+  /// While you're home with a leaving spot set, the app stays awake in the background on low-power location (it can't
+  /// read Bluetooth signal otherwise) and reads the strip every 2 s. Two readings at or past the spot in a row mean
+  /// you've reached it. Stops as soon as you're away.
+  private func updateWatch() {
+    let should = enabled && offWhenLeaving && leaveSpot != nil && awaySince == nil && locationAlways && room != nil
+    if should, watchTimer == nil {
+      belowCount = 0
+      watchTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        MainActor.assumeIsolated { self?.checkLeave() }
+      }
+      updateLocationUpdates()
+    } else if !should, watchTimer != nil {
+      watchTimer?.invalidate()
+      watchTimer = nil
+      updateLocationUpdates()
+    }
+  }
+
+  private func checkLeave() {
+    guard let room, let spot = leaveSpot else { return }
+    let id = leaveStrip.flatMap { id in connected.first { $0.id == id }?.id } ?? connected.first?.id
+    // No strip connected: either you're already out of range (the drop is handled as leaving) or it's reconnecting.
+    guard let id else { return }
+    room.strip.readRSSI(id) { [weak self] rssi in
+      MainActor.assumeIsolated {
+        guard let self, let rssi, self.awaySince == nil else { return }
+        self.belowCount = rssi <= spot ? self.belowCount + 1 : 0
+        if self.belowCount >= 2 {
+          self.belowCount = 0
+          self.left("You passed your leaving spot (\(rssi) dBm).")
+        }
+      }
+    }
+  }
+
+  /// Location updates keep the app running in the background, for ranging while you walk in or watching while you're
+  /// home. Lowest accuracy: it's the running that matters, not the fix.
+  private func updateLocationUpdates() {
+    if rangeTarget != nil || watchTimer != nil {
+      location.allowsBackgroundLocationUpdates = true
+      location.pausesLocationUpdatesAutomatically = false
+      location.showsBackgroundLocationIndicator = false
+      location.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+      location.startUpdatingLocation()
+    } else {
+      location.stopUpdatingLocation()
+      location.allowsBackgroundLocationUpdates = false
     }
   }
 
@@ -210,6 +336,8 @@ final class WalkIn: NSObject {
       return
     }
     beginBackground()
+    // The cloud bulb needs a few seconds to load after a relaunch: start now, while you're still walking in.
+    Task { [weak self] in await self?.room?.reconnect() }
     let deadline = Date().addingTimeInterval(Self.spotWait)
     // The beacon sits in your room, so its signal places you better than a strip's.
     if let beaconSpot, useLocation {
@@ -263,11 +391,12 @@ final class WalkIn: NSObject {
     welcomed = Set(room.welcome(scene: sceneID))
     lastArrival = Date()
     arrivedAt = Date()
+    updateWatch()
     note(welcomed.isEmpty ? "Home, but no light in \(room.currentRoom) was ready yet." : "Welcome home: \(sceneID ?? "lights on") (\(welcomed.count) lights).")
     beginBackground()
     // The cloud bulb loads a few seconds after a background relaunch, and other lights connect when they connect.
     Task { [weak self] in
-      for wait in [4.0, 8, 12] {
+      for wait in [3.0, 5, 7, 10, 15, 20] {
         try? await Task.sleep(for: .seconds(wait))
         self?.lightReady()
       }
@@ -289,21 +418,14 @@ final class WalkIn: NSObject {
   private func startRanging(until deadline: Date? = nil, spot: Int? = nil) {
     if let deadline, let spot { rangeTarget = (spot, deadline) }
     // Ranging only runs in the background while location updates do; they stop as soon as you're in.
-    if rangeTarget != nil {
-      location.allowsBackgroundLocationUpdates = true
-      location.pausesLocationUpdatesAutomatically = false
-      location.showsBackgroundLocationIndicator = false
-      location.desiredAccuracy = kCLLocationAccuracyThreeKilometers
-      location.startUpdatingLocation()
-    }
+    if rangeTarget != nil { updateLocationUpdates() }
     location.startRangingBeacons(satisfying: Self.beacon)
   }
 
   private func stopRanging() {
     location.stopRangingBeacons(satisfying: Self.beacon)
-    location.stopUpdatingLocation()
-    location.allowsBackgroundLocationUpdates = false
     rangeTarget = nil
+    updateLocationUpdates()
   }
 
   /// Every 5 s while walking in: if ranging went quiet, stop waiting for a reading that won't come.
@@ -497,6 +619,7 @@ extension WalkIn: CLLocationManagerDelegate {
     let status = manager.authorizationStatus
     MainActor.assumeIsolated {
       locationAlways = status == .authorizedAlways
+      updateWatch()
       guard locating else { return }
       switch status {
       case .authorizedAlways, .authorizedWhenInUse:

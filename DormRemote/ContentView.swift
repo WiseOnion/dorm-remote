@@ -2147,13 +2147,14 @@ private struct WalkInSection: View {
 
           Toggle(isOn: Binding(get: { walkIn.offWhenLeaving }, set: { walkIn.offWhenLeaving = $0 })) {
             VStack(alignment: .leading, spacing: 2) {
-              Text("Turn off the smart bulb when I leave").font(.body.weight(.semibold))
-              Text("It's on Wi-Fi, so it can still be reached once you're gone. The strips can't: they're out of Bluetooth range by then.")
+              Text("Turn everything off when I leave").font(.body.weight(.semibold))
+              Text("Strips and bulb go off together.")
                 .font(.footnote)
                 .foregroundStyle(Ink.dim)
             }
           }
           .frame(minHeight: 44)
+          if walkIn.offWhenLeaving { leaveSection(walkIn) }
 
           Button { walkIn.tryNow() } label: {
             Label("Try it now", systemImage: "play.fill")
@@ -2229,6 +2230,41 @@ private struct WalkInSection: View {
       Text(state).font(.footnote).foregroundStyle(Ink.dim).multilineTextAlignment(.trailing)
     }
     .accessibilityElement(children: .combine)
+  }
+
+  /// Walk out's spot: where on the way out everything turns off.
+  private func leaveSection(_ walkIn: WalkIn) -> some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Leaving spot").font(.headline)
+      Text(walkIn.leaveSpot == nil
+           ? "Not set: the lights go off when iOS notices you've left your room, about 30 s later, and the strips only if they're still in range then. Walk out to where you want them off (outside your door, or down the hall while the strips still reach you) and tap Set leaving spot."
+           : walkIn.watching
+             ? "Set (\(walkIn.leaveSpot!) dBm). Watching while you're home: when you pass it, everything goes off together. Dorm Remote stays awake in the background for this, which uses a little battery."
+             : "Set (\(walkIn.leaveSpot!) dBm). Needs Use location, set to Always, to watch for you passing it.")
+        .font(.subheadline)
+        .foregroundStyle(Ink.dim)
+        .fixedSize(horizontal: false, vertical: true)
+      HStack(spacing: 12) {
+        Button { walkIn.setLeaveSpot() } label: {
+          HStack(spacing: 8) {
+            if walkIn.measuringLeave { ProgressView() }
+            Text(walkIn.measuringLeave ? "Measuring…" : walkIn.leaveSpot == nil ? "Set leaving spot" : "Set it again")
+          }
+          .font(.body.weight(.semibold))
+          .frame(maxWidth: .infinity, minHeight: 52)
+          .background(Capsule().fill(Ink.raised))
+        }
+        .buttonStyle(Press())
+        .disabled(walkIn.measuringLeave)
+        if walkIn.leaveSpot != nil {
+          Button("Clear") { walkIn.clearLeaveSpot() }
+            .frame(minWidth: 64, minHeight: 52)
+        }
+      }
+      if let error = walkIn.leaveError {
+        Text(error).font(.footnote).foregroundStyle(Ink.bad).fixedSize(horizontal: false, vertical: true)
+      }
+    }
   }
 
   private func spotSection(_ walkIn: WalkIn) -> some View {

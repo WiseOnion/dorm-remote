@@ -861,13 +861,16 @@ final class Room {
     return lights.map(\.id)
   }
 
-  /// Walk in, leaving: turns off what the app can still reach once you're gone, the cloud bulbs in your strips' rooms.
-  /// Returns how many it turned off.
+  /// Walk out: every light that's on in your strips' rooms (the strips, Bluetooth bulbs and the cloud bulb) turns off
+  /// at the same moment, the slow cloud bulb sent early to land with the rest. Returns how many.
   func leaveOff() -> Int {
     let rooms = Set(items.filter { $0.kind == .strip }.map(roomOf))
-    let bulbs = ready.filter { $0.kind == .bulb && $0.on && rooms.contains(roomOf($0)) }
-    bulbs.forEach { power($0, false) }
-    return bulbs.count
+    let lights = ready.filter { $0.on && $0.caps.contains(.power) && (rooms.isEmpty || rooms.contains(roomOf($0))) }
+    guard !lights.isEmpty else { return 0 }
+    stopEffect(on: lights)
+    together(lights) { [weak self] in self?.power($0, false) }
+    for light in lights { stripUUID(light).map { s in updateLook(s) { $0.on = false } } }
+    return lights.count
   }
 
   private var shuffle = 0
