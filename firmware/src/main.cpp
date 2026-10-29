@@ -47,7 +47,7 @@ static bool showingBeacon = false;
 static uint32_t lastSwap = 0;
 
 // Advertising stops when the phone connects; keep it going so the beacon stays visible while you're home.
-class Server : public NimBLEServerCallbacks {
+class KeepAdvertising : public NimBLEServerCallbacks {
   void onConnect(NimBLEServer *s, NimBLEConnInfo &info) override { NimBLEDevice::startAdvertising(); }
 };
 
@@ -105,7 +105,7 @@ void setup() {
 
   NimBLEDevice::init("DormBridge");
   NimBLEServer *server = NimBLEDevice::createServer();
-  server->setCallbacks(new Server());
+  server->setCallbacks(new KeepAdvertising());
   server->advertiseOnDisconnect(true);
   NimBLEService *service = server->createService("DB00");
   service->createCharacteristic("DB01", NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR)->setCallbacks(new Commands());
