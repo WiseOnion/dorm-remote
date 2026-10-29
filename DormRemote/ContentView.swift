@@ -815,47 +815,21 @@ private struct SceneMaker: View {
 // MARK: - Settings
 
 extension ContentView {
-  /// Settings, like Hue's last tab: devices, rooms and accounts. Set up once, then out of the way of the Room tab.
+  /// Settings, the backstage: rooms, devices, accounts and diagnostics. Small rows and system symbols; this is the
+  /// one place the hardware (strips, the cloud bulb, the IR bridge) is named.
   var settingsTab: some View {
     NavigationStack {
       List {
-        Section("Devices") {
-          ForEach(room.items) { item in
-            Button { open(item) } label: {
-              HStack(spacing: 12) {
-                Orb(item: item, color: room.live[item.id], size: 36)
-                VStack(alignment: .leading, spacing: 2) {
-                  Text(item.name).foregroundStyle(Ink.text)
-                  if case .offline(let why) = item.status {
-                    Text(why).font(.footnote).foregroundStyle(Ink.bad)
-                  } else {
-                    Text(room.roomOf(item)).font(.footnote).foregroundStyle(Ink.dim)
-                  }
-                }
-                Spacer()
-                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
-              }
-            }
-            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-              Button(role: .destructive) { removing = item } label: { Label("Remove", systemImage: "trash") }
-            }
-            .swipeActions(edge: .leading) {
-              if item.status == .ready, item.caps.contains(.power) {
-                Button { room.identify(item.id) } label: { Label("Blink", systemImage: "light.max") }.tint(Ink.raised)
-              }
-            }
-          }
-          Button { sheet = .add } label: { Label("Add a device", systemImage: "plus") }
-        }
-        .listRowBackground(Ink.card)
-        Section("Rooms") {
+      Group {
+        Section {
           ForEach(room.rooms, id: \.self) { name in
             Button {
               roomName = name
               roomEdit = .rename(name)
             } label: {
               LabeledContent(name) {
-                Text("\(room.items.filter { room.roomOf($0) == name }.count)").foregroundStyle(Ink.dim)
+                let n = room.items.filter { room.roomOf($0) == name }.count
+                Text(n == 1 ? "1 device" : "\(n) devices").foregroundStyle(Ink.dim)
               }
               .foregroundStyle(Ink.text)
             }
@@ -869,35 +843,106 @@ extension ContentView {
             roomName = ""
             roomEdit = .add
           } label: { Label("Add a room", systemImage: "plus") }
-        }
-        .listRowBackground(Ink.card)
-        Section("Hubspace") {
-          if room.hubspace.state == .ready {
-            Button("Sign out", role: .destructive) { room.hubspace.signOut() }
-          } else {
-            Button("Sign in") { sheet = .hubSetup }
+        } header: { SectionTitle("Rooms") }
+
+        Section {
+          ForEach(room.items) { item in
+            Button { open(item) } label: {
+              HStack(spacing: 12) {
+                Image(systemName: deviceSymbol(item))
+                  .font(.body)
+                  .foregroundStyle(Ink.dim)
+                  .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                  Text(item.name).foregroundStyle(Ink.text)
+                  if case .offline(let why) = item.status {
+                    Text(why).font(.footnote).foregroundStyle(Ink.bad)
+                  } else {
+                    Text("\(deviceKind(item)) · \(room.roomOf(item))").font(.footnote).foregroundStyle(Ink.dim)
+                  }
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim)
+              }
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+              Button(role: .destructive) { removing = item } label: { Label("Remove", systemImage: "trash") }
+            }
+            .swipeActions(edge: .leading) {
+              if item.status == .ready, item.caps.contains(.power) {
+                Button { room.identify(item.id) } label: { Label("Blink", systemImage: "light.max") }.tint(.gray)
+              }
+            }
           }
+          LabeledContent {
+            Text(bridgeState).foregroundStyle(Ink.dim)
+          } label: {
+            Label("IR bridge", systemImage: "sensor.tag.radiowaves.forward")
+          }
+          Button { sheet = .add } label: { Label("Add a device", systemImage: "plus") }
+        } header: { SectionTitle("Devices") } footer: {
+          Text("Swipe right on a light to blink it.")
         }
-        .listRowBackground(Ink.card)
+
+        Section {
+          if room.hubspace.state == .ready {
+            Button("Sign out of Hubspace", role: .destructive) { room.hubspace.signOut() }
+          } else {
+            Button("Sign in to Hubspace") { sheet = .hubSetup }
+          }
+        } header: { SectionTitle("Accounts") }
+
         Section {
           Toggle("Reduce flashing", isOn: Binding(get: { room.reduceFlashing }, set: { room.reduceFlashing = $0 }))
-        } footer: {
+        } header: { SectionTitle("Comfort") } footer: {
           Text("Hides blink, flash and strobe effects and calms music mode.")
         }
-        .listRowBackground(Ink.card)
-        Section("Help") {
-          Button { sheet = .log } label: { Label("Activity log", systemImage: "doc.text") }
+
+        Section {
           Button {
             if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
           } label: { Label("Bluetooth and location access", systemImage: "hand.raised") }
+          Button { sheet = .log } label: { Label("Activity log", systemImage: "doc.text") }
+        } header: { SectionTitle("System") }
+
+        Section {
           LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "")
-        }
-        .listRowBackground(Ink.card)
+        } header: { SectionTitle("About") }
       }
+      .listRowBackground(Ink.card)
+      }
+      .listStyle(.insetGrouped)
       .scrollContentBackground(.hidden)
       .background(RoomGlow(room: room))
       .foregroundStyle(Ink.text)
+      .tint(Ink.text)
       .navigationTitle("Settings")
+    }
+  }
+
+  private func deviceSymbol(_ item: LightItem) -> String {
+    switch item.kind {
+    case .strip: "light.strip.2"
+    case .bulb, .bleBulb: "lightbulb"
+    case .remote: "av.remote"
+    }
+  }
+
+  private func deviceKind(_ item: LightItem) -> String {
+    switch item.kind {
+    case .strip: "LED strip"
+    case .bulb: "Hubspace bulb"
+    case .bleBulb: "Bluetooth bulb"
+    case .remote: "Infrared"
+    }
+  }
+
+  private var bridgeState: String {
+    switch room.bridge.state {
+    case .ready: "Connected"
+    case .connecting: "Connecting"
+    case .searching: "Looking for it"
+    case .off: "Not set up"
     }
   }
 }
@@ -1038,6 +1083,7 @@ private struct Orb: View {
 }
 
 /// What a light is doing, in plain words: "Violet · 72%", "Candlelight", "Off", "Not reachable". No hardware words.
+@MainActor
 private func plainState(_ item: LightItem, in room: Room) -> String {
   switch item.status {
   case .ready:
@@ -2269,7 +2315,7 @@ private struct WalkInSection: View {
 private struct ScheduleSection: View {
   @Environment(\.openURL) private var openURL
 
-  private static let recipes: [(icon: String, title: String, how: String)] = [
+  static let recipes: [(icon: String, title: String, how: String)] = [
     ("sunrise", "Wake up to light", "Automation → Alarm → Is Stopped → Run Immediately → Dorm Remote: Set scene → Sunrise."),
     ("moon.zzz", "Fade out at bedtime", "Automation → Sleep (Focus) → Turns On → Run Immediately → Dorm Remote: Fade lights out."),
     ("clock", "Lights on at a set time", "Automation → Time of Day → pick a time → Run Immediately → Dorm Remote: Set scene."),
@@ -2309,71 +2355,79 @@ private struct ScheduleSection: View {
   }
 }
 
-/// The Automations tab, like Hue's and Google Home's: one card per automation with its switch and what it will do;
-/// the settings are one tap deeper, so the tab reads at a glance.
+/// The Automations tab: whether you're home, what happens when you arrive, and what runs on a schedule. Each one is a
+/// compact row; the details are one tap deeper.
 private struct AutomationsTab: View {
   var room: Room
-  @State private var walkInOpen = false
-  @State private var schedulesOpen = false
 
   var body: some View {
     let walkIn = room.walkIn
     NavigationStack {
-      ScrollView {
-        VStack(alignment: .leading, spacing: 12) {
-          SectionTitle("Automatic")
-          card(icon: "figure.walk.arrival", title: "Walk in", detail: walkInSummary(walkIn),
-               on: Binding(get: { walkIn.enabled }, set: { walkIn.enabled = $0 })) { walkInOpen = true }
-          SectionTitle("With Shortcuts").padding(.top, 20)
-          card(icon: "clock", title: "Schedules", detail: "Wake up, bedtime, a set time, Siri and the Action Button", on: nil) { schedulesOpen = true }
+      List {
+      Group {
+        if walkIn.enabled {
+          Section {
+            HStack(spacing: 16) {
+              Image(systemName: walkIn.isAway ? "figure.walk.departure" : "house.fill")
+                .font(.title2)
+                .frame(width: 48, height: 48)
+                .background(Circle().fill(Ink.raised))
+              VStack(alignment: .leading, spacing: 2) {
+                Text(walkIn.isAway ? "Away" : "You're home").font(.title3.weight(.semibold))
+                Text(presenceDetail(walkIn)).font(.subheadline).foregroundStyle(Ink.dim)
+              }
+            }
+            .padding(.vertical, 8)
+            .accessibilityElement(children: .combine)
+          }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+
+        Section {
+          Toggle(isOn: Binding(get: { walkIn.enabled }, set: { walkIn.enabled = $0 })) {
+            VStack(alignment: .leading, spacing: 2) {
+              Text("Walk in")
+              Text("Lights up when you come back").font(.footnote).foregroundStyle(Ink.dim)
+            }
+          }
+          if walkIn.enabled {
+            NavigationLink {
+              page("Walk in") { WalkInSection(room: room) }
+            } label: {
+              LabeledContent("Turns on") {
+                Text("\(walkIn.sceneID ?? "Lights as they were") · \(walkIn.awayMinutes) min away")
+              }
+            }
+          }
+        } header: { SectionTitle("When you arrive") }
+
+        Section {
+          ForEach(ScheduleSection.recipes, id: \.title) { r in
+            NavigationLink {
+              page(r.title) { RecipePage(icon: r.icon, title: r.title, how: r.how) }
+            } label: {
+              Label(r.title, systemImage: r.icon)
+            }
+          }
+        } header: { SectionTitle("Schedules") } footer: {
+          Text("Set up once in the Shortcuts app. They run on their own, even when Dorm Remote is closed.")
+        }
       }
-      .scrollIndicators(.hidden)
+      .listRowBackground(Ink.card)
+      }
+      .listStyle(.insetGrouped)
+      .scrollContentBackground(.hidden)
       .background(RoomGlow(room: room))
       .foregroundStyle(Ink.text)
+      .tint(Ink.text)
       .navigationTitle("Automations")
-      .navigationDestination(isPresented: $walkInOpen) { page("Walk in") { WalkInSection(room: room) } }
-      .navigationDestination(isPresented: $schedulesOpen) { page("Schedules") { ScheduleSection() } }
+      .animation(Motion.state, value: walkIn.enabled)
     }
   }
 
-  private func walkInSummary(_ walkIn: WalkIn) -> String {
-    guard walkIn.enabled else { return "Off" }
-    let what = walkIn.sceneID ?? "Lights as they were"
-    if let last = walkIn.events.first {
-      return "\(what) · last: \(last.time.formatted(date: .omitted, time: .shortened))"
-    }
-    return "\(what) after \(walkIn.awayMinutes) min away"
-  }
-
-  private func card(icon: String, title: String, detail: String, on: Binding<Bool>?, open: @escaping () -> Void) -> some View {
-    HStack(spacing: 14) {
-      Button(action: open) {
-        HStack(spacing: 14) {
-          Image(systemName: icon)
-            .font(.body.weight(.semibold))
-            .frame(width: 44, height: 44)
-            .foregroundStyle(on?.wrappedValue == true ? Ink.inverse : Ink.text)
-            .background(Circle().fill(on?.wrappedValue == true ? Ink.text : Ink.raised))
-          VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.body.weight(.semibold))
-            Text(detail).font(.footnote).foregroundStyle(Ink.dim).lineLimit(2)
-          }
-          Spacer(minLength: 0)
-          if on == nil { Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(Ink.dim) }
-        }
-        .contentShape(Rectangle())
-      }
-      .buttonStyle(Press())
-      if let on {
-        Toggle(title, isOn: on).labelsHidden()
-      }
-    }
-    .padding(16)
-    .card()
-    .animation(Motion.state, value: on?.wrappedValue)
+  private func presenceDetail(_ walkIn: WalkIn) -> String {
+    if walkIn.isAway, let since = walkIn.awayDate { return "Since \(since.formatted(date: .omitted, time: .shortened))" }
+    if let back = walkIn.lastArrival { return "Back since \(back.formatted(date: .omitted, time: .shortened))" }
+    return "Walk in is watching for you"
   }
 
   private func page<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
@@ -2387,6 +2441,38 @@ private struct AutomationsTab: View {
     .foregroundStyle(Ink.text)
     .navigationTitle(title)
     .navigationBarTitleDisplayMode(.inline)
+  }
+}
+
+/// One Shortcuts recipe: what it does and the steps to set it up.
+private struct RecipePage: View {
+  let icon: String
+  let title: String
+  let how: String
+  @Environment(\.openURL) private var openURL
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 24) {
+      Image(systemName: icon)
+        .font(.title)
+        .frame(width: 64, height: 64)
+        .background(Circle().fill(Ink.raised))
+      VStack(alignment: .leading, spacing: 8) {
+        SectionTitle("How to set it up")
+        Text(how).fixedSize(horizontal: false, vertical: true)
+      }
+      Button {
+        if let url = URL(string: "shortcuts://") { openURL(url) }
+      } label: {
+        Text("Open Shortcuts")
+          .font(.body.weight(.semibold))
+          .frame(maxWidth: .infinity, minHeight: 52)
+          .foregroundStyle(Ink.inverse)
+          .background(Capsule().fill(Ink.text))
+      }
+      .buttonStyle(Press())
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
   }
 }
 
