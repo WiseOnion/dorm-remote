@@ -78,6 +78,8 @@ final class WalkIn: NSObject {
   private(set) var nearBeacon: Bool?
   /// The latest beacon reading while ranging, for the screen.
   private(set) var beaconRSSI: Int?
+  /// Location is set to Always. With only While Using, iOS can't wake the app for the beacon or the circle.
+  private(set) var locationAlways = false
   /// Signal strength (dBm) at your door. Nil: light up as soon as a strip is back.
   private(set) var spot = UserDefaults.standard.object(forKey: "walkInSpot") as? Int {
     didSet { UserDefaults.standard.set(spot, forKey: "walkInSpot") }
@@ -137,6 +139,7 @@ final class WalkIn: NSObject {
     super.init()
     // Set up early in launch: a region crossing that relaunched the app is delivered to this delegate (Apple DTS).
     location.delegate = self
+    locationAlways = location.authorizationStatus == .authorizedAlways
   }
 
   private var connected: [Strip] { room?.strip.strips.filter { $0.state == .connected } ?? [] }
@@ -465,6 +468,7 @@ extension WalkIn: CLLocationManagerDelegate {
   nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
     let status = manager.authorizationStatus
     MainActor.assumeIsolated {
+      locationAlways = status == .authorizedAlways
       guard locating else { return }
       switch status {
       case .authorizedAlways, .authorizedWhenInUse:

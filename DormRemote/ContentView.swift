@@ -2015,12 +2015,24 @@ private struct WalkInSection: View {
              good: connected > 0)
       sensor("sensor.tag.radiowaves.forward", "Room beacon",
              !walkIn.useLocation ? "Turn on Use location"
+               : !walkIn.locationAlways ? "Needs location set to Always"
                : walkIn.nearBeacon == true ? (walkIn.beaconRSSI.map { "In range (\($0) dBm)" } ?? "In range")
                : walkIn.nearBeacon == false ? "Out of range" : "Not seen yet. Plug in the IR bridge (firmware from Oct 29 or later)",
              good: walkIn.nearBeacon == true)
       sensor("mappin.circle", "Area around home",
-             !walkIn.useLocation ? "Off" : walkIn.home == nil ? "Not set" : "Set (150 m)",
-             good: walkIn.useLocation && walkIn.home != nil)
+             !walkIn.useLocation ? "Off" : !walkIn.locationAlways ? "Needs location set to Always" : walkIn.home == nil ? "Not set" : "Set (150 m)",
+             good: walkIn.useLocation && walkIn.locationAlways && walkIn.home != nil)
+      if walkIn.useLocation, !walkIn.locationAlways {
+        Button {
+          if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
+        } label: {
+          Text("Open Settings → Location → Always")
+            .font(.subheadline.weight(.semibold))
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(Capsule().fill(Ink.raised))
+        }
+        .buttonStyle(Press())
+      }
     }
     .padding(16)
     .card()
