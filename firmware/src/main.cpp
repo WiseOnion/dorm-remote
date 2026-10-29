@@ -13,7 +13,8 @@
 //   10 type bits v0..v7      learned code, same layout as command 02
 //
 // Room beacon: every other second the board advertises as an iBeacon (UUID D0A1E7B2-6F2C-4C8B-9E31-5B7A0C1D2E3F,
-// major 1, minor 1). iOS relaunches an app for beacon region crossings even after it was swiped away, so the
+// major 1, minor 1), in the standard form (non-connectable, no scan response) and at -12 dBm, so iOS reports you
+// "in range" near your door rather than down the hall. iOS relaunches an app for beacon region crossings even after it was swiped away, so the
 // phone's Walk in knows when you come into and leave your room. The other second it advertises as DormBridge with
 // service DB00, because iOS hides iBeacon advertisements from apps that scan with Core Bluetooth.
 #include <Arduino.h>
@@ -40,7 +41,7 @@ static const uint8_t kBeacon[25] = {
   0xD0, 0xA1, 0xE7, 0xB2, 0x6F, 0x2C, 0x4C, 0x8B, 0x9E, 0x31, 0x5B, 0x7A, 0x0C, 0x1D, 0x2E, 0x3F,
   0x00, 0x01,  // major
   0x00, 0x01,  // minor
-  0xC5,        // signal at 1 m: -59 dBm
+  0xB9,        // signal at 1 m: about -71 dBm at -12 dBm transmit power
 };
 static NimBLEAdvertisementData beaconFrame, bridgeFrame;
 static bool showingBeacon = false;
@@ -133,6 +134,9 @@ void loop() {
     showingBeacon = !showingBeacon;
     NimBLEAdvertising *adv = NimBLEDevice::getAdvertising();
     adv->stop();
+    adv->setConnectableMode(showingBeacon ? BLE_GAP_CONN_MODE_NON : BLE_GAP_CONN_MODE_UND);
+    adv->enableScanResponse(!showingBeacon);
+    NimBLEDevice::setPower(showingBeacon ? -12 : 9, NimBLETxPowerType::Advertise);
     adv->setAdvertisementData(showingBeacon ? beaconFrame : bridgeFrame);
     adv->start();
   }

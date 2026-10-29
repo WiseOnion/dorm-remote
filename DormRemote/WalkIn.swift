@@ -122,6 +122,9 @@ final class WalkIn: NSObject {
   private var rangeStarted = Date.distantPast
   private var rangeHeard = false
   private var rangeStrip: UUID?
+  /// The last ranging callback. iOS 18 can stop ranging while the screen is off (Apple developer forums); the app
+  /// keeps running then (location updates), so a watchdog notices the silence.
+  private var lastRanged = Date.distantPast
   /// Readings collected by Set my spot.
   private var spotReadings: [Int]?
   /// Lights already welcomed this time, so a late one is lit once and a light you switch off stays off.
@@ -209,7 +212,9 @@ final class WalkIn: NSObject {
       rangeStarted = Date()
       rangeHeard = false
       rangeStrip = id
+      lastRanged = Date()
       startRanging(until: deadline, spot: beaconSpot)
+      watchRanging()
     } else if let id, let spot {
       note("\(via) after \(minutes) min. Waiting for you to reach your spot.")
       waitForSpot(id, spot, until: deadline)
@@ -281,6 +286,7 @@ final class WalkIn: NSObject {
     // Ranging only runs in the background while location updates do; they stop as soon as you're in.
     if rangeTarget != nil {
       location.allowsBackgroundLocationUpdates = true
+      location.pausesLocationUpdatesAutomatically = false
       location.showsBackgroundLocationIndicator = false
       location.desiredAccuracy = kCLLocationAccuracyThreeKilometers
       location.startUpdatingLocation()
@@ -295,7 +301,24 @@ final class WalkIn: NSObject {
     rangeTarget = nil
   }
 
+  /// Every 5 s while walking in: if ranging went quiet, stop waiting for a reading that won't come.
+  private func watchRanging() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+      MainActor.assumeIsolated {
+        guard self.rangeTarget != nil else { return }
+        if Date().timeIntervalSince(self.lastRanged) > 12 {
+          self.stopRanging()
+          self.note("iOS paused beacon readings (screen off?). Lighting up, since you're in range.")
+          self.arrive(self.rangeStrip)
+        } else {
+          self.watchRanging()
+        }
+      }
+    }
+  }
+
   private func ranged(_ rssi: Int?) {
+    lastRanged = Date()
     beaconRSSI = rssi
     if rssi != nil { nearBeacon = true }
     if spotReadings != nil, let rssi { spotReadings?.append(rssi) }
